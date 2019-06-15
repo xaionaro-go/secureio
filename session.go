@@ -106,7 +106,7 @@ func newSession(identity, remoteIdentity *Identity, backend io.ReadWriteCloser, 
 		state:          SessionState_new,
 		backend:        backend,
 		logger:         logger,
-		writeDeferChan: make(chan *writeItem),
+		writeDeferChan: make(chan *writeItem, 1024),
 	}
 
 	for i := 0; i < MessageTypeMax; i++ {
@@ -308,22 +308,22 @@ func (sess *Session) WriteMessage(msgType MessageType, payload []byte) (int, err
 		return -1, errors.Wrap(ErrTooBig)
 	}
 
-	shouldBreak := false
-	sess.LockDo(func() {
-		if sess.cipher == nil && msgType != MessageType_keyExchange {
-			item := newWriteItem()
-			item.MsgType = msgType
-			item.Payload = item.Payload[:len(payload)]
-			copy(item.Payload, payload)
-			go func(item *writeItem) {
+	if msgType != MessageType_keyExchange {
+		shouldBreak := false
+		sess.LockDo(func() {
+			if sess.cipher == nil {
+				item := newWriteItem()
+				item.MsgType = msgType
+				item.Payload = item.Payload[:len(payload)]
+				copy(item.Payload, payload)
 				sess.writeDeferChan <- item
-			}(item)
-			shouldBreak = true
-			return
+				shouldBreak = true
+				return
+			}
+		})
+		if shouldBreak {
+			return len(payload), nil
 		}
-	})
-	if shouldBreak {
-		return len(payload), nil
 	}
 
 	msg := newMessageHeaders()
