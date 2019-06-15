@@ -9,11 +9,12 @@ import (
 type SessionState uint64
 
 const (
-	SessionState_closed        = SessionState(iota)
-	SessionState_keyExchanging = SessionState(iota)
-	SessionState_established   = SessionState(iota)
-	SessionState_closing       = SessionState(iota)
-	sessionState_inTransition  = SessionState(iota)
+	SessionState_new = SessionState(iota)
+	SessionState_closed
+	SessionState_keyExchanging
+	SessionState_established
+	SessionState_closing
+	sessionState_inTransition
 )
 
 func randSleep() {

@@ -1,9 +1,8 @@
 package cryptofilter
 
 import (
+	"sync"
 	"unsafe"
-
-	"github.com/xaionaro-go/bufling"
 )
 
 const (
@@ -11,17 +10,25 @@ const (
 	maxPayloadSize = 1024
 )
 
-type messageType uint8
+type MessageType uint8
 
 const (
-	messageType_undefined     = iota
-	messageType_keyExchange   = iota
-	messageType_directPacket  = iota
-	messageType_transitPacket = iota
+	MessageType_undefined = iota
+	MessageType_keyExchange
+	MessageType_dataPacketType0
+	MessageType_dataPacketType1
+	MessageType_dataPacketType2
+	MessageType_dataPacketType3
+	MessageType_dataPacketType4
+	MessageType_dataPacketType5
+	MessageType_dataPacketType6
+	MessageType_dataPacketType7
+
+	MessageTypeMax
 )
 
 type messageHeaders struct {
-	Type     messageType
+	Type     MessageType
 	Length   uint16
 	Checksum uint32
 }
@@ -29,19 +36,9 @@ type messageHeaders struct {
 var messageHeadersSize = unsafe.Sizeof(messageHeaders{})
 
 func (msg *messageHeaders) Reset() {
-	msg.Type = messageType_undefined
+	msg.Type = MessageType_undefined
 	msg.Length = 0
-}
-
-type messageWSlice struct {
-	messageHeaders
-
-	Payload []byte
-}
-
-func (msg *messageWSlice) Reset() {
-	msg.messageHeaders.Reset()
-	msg.Payload = nil
+	msg.Checksum = 0
 }
 
 type message struct {
@@ -51,10 +48,32 @@ type message struct {
 }
 
 var (
-	messagesPool = bufling.NewAnyPool(maxParallel, func(buf *bufling.AnyBuffer) {
-		buf.Buffer = &message{}
-	})
-	messagesWSlicePool = bufling.NewAnyPool(maxParallel, func(buf *bufling.AnyBuffer) {
-		buf.Buffer = &messageWSlice{}
-	})
+	messagePool = sync.Pool{
+		New: func() interface{} {
+			return &message{}
+		},
+	}
+	messageHeadersPool = sync.Pool{
+		New: func() interface{} {
+			return &messageHeaders{}
+		},
+	}
 )
+
+func newMessage() *message {
+	return messagePool.Get().(*message)
+}
+
+func newMessageHeaders() *messageHeaders {
+	return messageHeadersPool.Get().(*messageHeaders)
+}
+
+func (msg *messageHeaders) Release() {
+	msg.Reset()
+	messageHeadersPool.Put(msg)
+}
+
+func (msg *message) Release() {
+	msg.Reset()
+	messagePool.Put(msg)
+}

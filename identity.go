@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -14,10 +15,20 @@ import (
 )
 
 const (
-	authorizedKeysFileName = `authorized_keys`
-	publicFileName         = `id_ed25519`
-	privateFileName        = `id_ed25519.pub`
+	//authorizedKeysFileName = `authorized_keys`
+	publicFileName  = `id_ed25519`
+	privateFileName = `id_ed25519.pub`
 )
+
+var (
+	ErrInvalidSignature = errors.New("invalid signature")
+)
+
+type Logger interface {
+	Error(error)
+	Infof(string, ...interface{})
+	Debugf(string, ...interface{})
+}
 
 type Keys struct {
 	Public  ed25519.PublicKey
@@ -81,7 +92,9 @@ func (i *Identity) generateAndSaveKeys(keysDir string) error {
 		return errors.Wrap(err, "Cannot generate keys")
 	}
 	err = i.savePrivateKey(keysDir)
-	i.savePublicKey(keysDir)
+	if err == nil {
+		err = i.savePublicKey(keysDir)
+	}
 	return errors.Wrap(err, "Cannot save keys")
 }
 
@@ -117,12 +130,21 @@ func (i *Identity) prepareKeys(keysDir string) error {
 		return i.generateAndSaveKeys(keysDir)
 	}
 	err = i.loadKeys(keysDir)
-	if _, err := os.Stat(filepath.Join(keysDir, publicFileName)); os.IsNotExist(err) {
-		i.savePublicKey(keysDir)
+	if err == nil {
+		if _, checkErr := os.Stat(filepath.Join(keysDir, publicFileName)); os.IsNotExist(checkErr) {
+			err = i.savePublicKey(keysDir)
+		}
 	}
 	return errors.Wrap(err, "Cannot load keys")
 }
 
-func (i *Identity) NewSession() *Session {
-	return newSession(i)
+func (i *Identity) NewSession(remoteIdentity *Identity, backend io.ReadWriteCloser, logger Logger) *Session {
+	return newSession(i, remoteIdentity, backend, logger)
+}
+
+func (i *Identity) VerifySignature(signature, data []byte) error {
+	if !ed25519.Verify(i.Keys.Public, data, signature) {
+		return ErrInvalidSignature
+	}
+	return nil
 }
