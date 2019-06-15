@@ -54,6 +54,11 @@ func NewIdentity(keysDir string) (*Identity, error) {
 	return i, i.prepareKeys(keysDir)
 }
 
+func NewRemoteIdentity(keyPath string) (*Identity, error) {
+	i := &Identity{}
+	return i, loadPublicKeyFromFile(&i.Keys.Public, keyPath)
+}
+
 func (i *Identity) savePublicKey(keysDir string) error {
 	return saveKeyToPemFile(
 		"ED25519 PUBLIC KEY",
@@ -96,6 +101,20 @@ func (i *Identity) generateAndSaveKeys(keysDir string) error {
 		err = i.savePublicKey(keysDir)
 	}
 	return errors.Wrap(err, "Cannot save keys")
+}
+
+func loadPublicKeyFromFile(keyPtr *ed25519.PublicKey, path string) error {
+	keyBytes, err := ioutil.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	block, _ := pem.Decode(keyBytes)
+	if len(block.Bytes) != ed25519.PublicKeySize {
+		return fmt.Errorf("Read key is of wrong length: %d != %d", len(block.Bytes), ed25519.PublicKeySize)
+	}
+	*keyPtr = block.Bytes
+	return nil
 }
 
 func loadPrivateKeyFromFile(keyPtr *ed25519.PrivateKey, path string) error {
