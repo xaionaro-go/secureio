@@ -1,7 +1,6 @@
 package cryptofilter
 
 import (
-	"fmt"
 	"io"
 	"os"
 	"testing"
@@ -19,13 +18,11 @@ func (p *pipeReadWriter) Close() error {
 
 func (p *pipeReadWriter) Read(b []byte) (int, error) {
 	n, err := p.Reader.Read(b)
-	fmt.Println(p.Prefix+" R", n, err, b)
 	return n, err
 }
 
 func (p *pipeReadWriter) Write(b []byte) (int, error) {
 	n, err := p.Writer.Write(b)
-	fmt.Println(p.Prefix+" W", n, err, b)
 	return n, err
 }
 

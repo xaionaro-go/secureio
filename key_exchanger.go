@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
-	"fmt"
 	"sync"
 	"time"
 
@@ -72,9 +71,7 @@ func (kx *keyExchanger) generateSharedKey(localPrivateKey *[PrivateKeySize]byte,
 func (kx *keyExchanger) Handle(b []byte) (err error) {
 	kx.LockDo(func() {
 		msg := &kx.remoteKeySeedUpdateMessage
-		fmt.Println("ReadFrom", msg, err)
 		err = binary.Read(bytes.NewBuffer(b), binaryOrderType, msg)
-		fmt.Println("/ReadFrom", msg, err)
 		if err != nil {
 			return
 		}
@@ -120,15 +117,12 @@ func (kx *keyExchanger) iterate() {
 	if now.Sub(lastExchangeTS) < time.Minute {
 		return
 	}
-	fmt.Println("test")
 	if !lastExchangeTS.IsZero() && now.Sub(lastExchangeTS) > 2*time.Minute {
 		_ = kx.Close()
 		kx.errFunc(errors.Wrap(ErrKeyExchangeTimeout))
 		return
 	}
-	fmt.Println("/test")
 	err := kx.sendPublicKey()
-	fmt.Println("//test")
 	if err != nil {
 		_ = kx.Close()
 		kx.errFunc(errors.Wrap(err))

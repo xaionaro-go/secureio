@@ -6,7 +6,6 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 	e "errors"
-	"fmt"
 	"hash/crc32"
 	"io"
 	"runtime"
@@ -308,8 +307,6 @@ func (sess *Session) WriteMessage(msgType MessageType, payload []byte) (int, err
 	if len(payload) > maxPayloadSize {
 		return -1, errors.Wrap(ErrTooBig)
 	}
-
-	fmt.Println(msgType, payload)
 
 	shouldBreak := false
 	sess.LockDo(func() {
