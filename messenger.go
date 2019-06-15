@@ -2,17 +2,20 @@ package cryptofilter
 
 import (
 	"errors"
-	"io"
 )
 
 var (
 	ErrPartialWrite = errors.New("partial write")
 )
 
+type Handler interface {
+	Handle([]byte) error
+}
+
 type Messenger struct {
 	messageType MessageType
 	sess        *Session
-	handler     io.ReaderFrom
+	handler     Handler
 	isClosed    bool
 }
 
@@ -27,8 +30,8 @@ func (w *Messenger) Write(p []byte) (int, error) {
 	return w.sess.WriteMessage(w.messageType, p)
 }
 
-func (w *Messenger) ReadFrom(r io.Reader) (n int64, err error) {
-	return w.handler.ReadFrom(r)
+func (w *Messenger) Handle(b []byte) error {
+	return w.handler.Handle(b)
 }
 
 func (w *Messenger) Close() error {
@@ -43,6 +46,6 @@ func (w *Messenger) Close() error {
 	return err
 }
 
-func (w *Messenger) SetHandler(handler io.ReaderFrom) {
+func (w *Messenger) SetHandler(handler Handler) {
 	w.handler = handler
 }

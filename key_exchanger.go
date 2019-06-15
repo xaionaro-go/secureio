@@ -1,9 +1,10 @@
 package cryptofilter
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/binary"
-	"io"
+	"fmt"
 	"sync"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 
 const (
 	PublicKeySize    = ed25519.PublicKeySize
-	PrivateKeySize   = ed25519.PrivateKeySize
+	PrivateKeySize   = ed25519.PublicKeySize
 	KeySignatureSize = ed25519.SignatureSize
 )
 
@@ -33,8 +34,8 @@ type keyExchanger struct {
 	errFunc                    func(error)
 	stopChan                   chan struct{}
 	lastExchangeTS             time.Time
-	nextLocalPrivateKey        []byte
-	nextLocalPublicKey         []byte
+	nextLocalPrivateKey        *[PrivateKeySize]byte
+	nextLocalPublicKey         *[PublicKeySize]byte
 	remoteKeySeedUpdateMessage keySeedUpdateMessage
 	localKeySeedUpdateMessage  keySeedUpdateMessage
 	localIdentity              *Identity
@@ -64,21 +65,24 @@ func (kx *keyExchanger) LockDo(fn func()) {
 	fn()
 }
 
-func (kx *keyExchanger) generateSharedKey(localPrivateKey, remotePublicKey []byte) ([]byte, error) {
+func (kx *keyExchanger) generateSharedKey(localPrivateKey *[PrivateKeySize]byte, remotePublicKey *[PublicKeySize]byte) ([]byte, error) {
 	return kx.ecdh.GenerateSharedSecret(localPrivateKey, remotePublicKey)
 }
 
-func (kx *keyExchanger) ReadFrom(r io.Reader) (n int64, err error) {
+func (kx *keyExchanger) Handle(b []byte) (err error) {
 	kx.LockDo(func() {
 		msg := &kx.remoteKeySeedUpdateMessage
-		err = binary.Read(r, binaryOrderType, msg)
+		fmt.Println("ReadFrom", msg, err)
+		err = binary.Read(bytes.NewBuffer(b), binaryOrderType, msg)
+		fmt.Println("/ReadFrom", msg, err)
 		if err != nil {
 			return
 		}
-		if kx.remoteIdentity.VerifySignature(msg.Signature[:], msg.PublicKey[:]) != nil {
+		if err := kx.remoteIdentity.VerifySignature(msg.Signature[:], msg.PublicKey[:]); err != nil {
+			kx.messenger.sess.logger.Debugf("wrong signature: %v", err)
 			return
 		}
-		nextKey, genErr := kx.generateSharedKey(kx.nextLocalPrivateKey, msg.PublicKey[:])
+		nextKey, genErr := kx.generateSharedKey(kx.nextLocalPrivateKey, &msg.PublicKey)
 		if genErr != nil {
 			kx.errFunc(errors.Wrap(genErr))
 			_ = kx.Close()
@@ -87,9 +91,7 @@ func (kx *keyExchanger) ReadFrom(r io.Reader) (n int64, err error) {
 		kx.okFunc(nextKey)
 		kx.lastExchangeTS = time.Now()
 	})
-	if err == nil {
-		n = keySeedUpdateMessageSize
-	} else {
+	if err != nil {
 		_ = kx.Close()
 		kx.errFunc(errors.Wrap(err))
 	}
@@ -109,7 +111,34 @@ func (kx *keyExchanger) start() {
 	go kx.loop()
 }
 
+func (kx *keyExchanger) iterate() {
+	var lastExchangeTS time.Time
+	kx.LockDo(func() {
+		lastExchangeTS = kx.lastExchangeTS
+	})
+	now := time.Now()
+	if now.Sub(lastExchangeTS) < time.Minute {
+		return
+	}
+	fmt.Println("test")
+	if !lastExchangeTS.IsZero() && now.Sub(lastExchangeTS) > 2*time.Minute {
+		_ = kx.Close()
+		kx.errFunc(errors.Wrap(ErrKeyExchangeTimeout))
+		return
+	}
+	fmt.Println("/test")
+	err := kx.sendPublicKey()
+	fmt.Println("//test")
+	if err != nil {
+		_ = kx.Close()
+		kx.errFunc(errors.Wrap(err))
+		return
+	}
+}
+
 func (kx *keyExchanger) loop() {
+	kx.UpdateKey()
+	kx.iterate()
 	sendPublicKeyTicker := time.NewTicker(time.Second)
 	for {
 		select {
@@ -118,32 +147,14 @@ func (kx *keyExchanger) loop() {
 			close(kx.stopChan)
 			return
 		case <-sendPublicKeyTicker.C:
-			var lastExchangeTS time.Time
-			kx.LockDo(func() {
-				lastExchangeTS = kx.lastExchangeTS
-			})
-			now := time.Now()
-			if now.Sub(lastExchangeTS) < time.Minute {
-				continue
-			}
-			if now.Sub(lastExchangeTS) > 2*time.Minute {
-				_ = kx.Close()
-				kx.errFunc(errors.Wrap(ErrKeyExchangeTimeout))
-				continue
-			}
-			err := kx.sendPublicKey()
-			if err != nil {
-				_ = kx.Close()
-				kx.errFunc(errors.Wrap(err))
-				continue
-			}
+			kx.iterate()
 		}
 	}
 }
 
 func (kx *keyExchanger) sendPublicKey() error {
 	msg := &kx.localKeySeedUpdateMessage
-	copy(msg.PublicKey[:], kx.nextLocalPublicKey)
+	copy(msg.PublicKey[:], (*kx.nextLocalPublicKey)[:])
 	sign := ed25519.Sign(kx.localIdentity.Keys.Private, msg.PublicKey[:])
 	copy(msg.Signature[:], sign)
 	return kx.send(msg)
@@ -156,8 +167,8 @@ func (kx *keyExchanger) UpdateKey() {
 		kx.errFunc(errors.Wrap(err))
 		return
 	}
-	kx.nextLocalPrivateKey = privKey.([]byte)
-	kx.nextLocalPublicKey = pubKey.([]byte)
+	kx.nextLocalPrivateKey = privKey.(*[PrivateKeySize]byte)
+	kx.nextLocalPublicKey = pubKey.(*[PublicKeySize]byte)
 	return
 }
 

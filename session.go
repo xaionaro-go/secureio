@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 	e "errors"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"runtime"
@@ -66,6 +67,7 @@ type Session struct {
 	cipher         cipher.Block
 	previousCipher cipher.Block
 	logger         Logger
+	writeDeferChan chan *writeItem
 }
 
 func (sess *Session) WaitForState(states ...SessionState) SessionState {
@@ -77,6 +79,7 @@ func (sess *Session) GetState() SessionState {
 }
 
 func (sess *Session) setState(state SessionState, cancelOnStates ...SessionState) (oldState SessionState) {
+	sess.logger.Debugf("setState: %v %v", state, cancelOnStates)
 	return sess.state.Set(state, cancelOnStates...)
 }
 
@@ -104,6 +107,7 @@ func newSession(identity, remoteIdentity *Identity, backend io.ReadWriteCloser, 
 		state:          SessionState_new,
 		backend:        backend,
 		logger:         logger,
+		writeDeferChan: make(chan *writeItem),
 	}
 
 	for i := 0; i < MessageTypeMax; i++ {
@@ -141,20 +145,24 @@ func (sess *Session) readerLoop() {
 		sess.logger.Debugf("/n, err := sess.backend.Read(inputBuffer): %v %v", n, err)
 		if err != nil {
 			_ = sess.Close()
-			sess.LogError(errors.Wrap(err))
+			sess.logger.Error(errors.Wrap(err))
 			continue
 		}
 
 		hdr, payload, err := sess.decrypt(&decryptedBuffer, inputBuffer[:n])
 		sess.logger.Debugf("%v %v %v", hdr, payload, err)
 		if err != nil {
-			sess.LogInfo("cannot decrypt: %v", errors.Wrap(err))
+			sess.logger.Infof("cannot decrypt: %v", errors.Wrap(err))
 			continue
 		}
 
 		item.Data = item.Data[0:hdr.Length]
 		copy(item.Data, payload)
-		sess.ReadChan[hdr.Type] <- item
+		if sess.messenger[hdr.Type] != nil {
+			sess.messenger[hdr.Type].Handle(payload)
+		} else {
+			sess.ReadChan[hdr.Type] <- item
+		}
 		hdr.Release()
 	}
 }
@@ -254,9 +262,71 @@ func (sess *Session) NewMessenger(msgType MessageType) *Messenger {
 	return messenger
 }
 
+type writeItem struct {
+	MsgType MessageType
+	Payload []byte
+}
+
+var (
+	writeItemPool = sync.Pool{
+		New: func() interface{} {
+			return &writeItem{
+				Payload: make([]byte, maxPacketSize),
+			}
+		},
+	}
+)
+
+func newWriteItem() *writeItem {
+	return writeItemPool.Get().(*writeItem)
+}
+
+func (it *writeItem) Release() {
+	it.Reset()
+	writeItemPool.Put(it)
+}
+
+func (it *writeItem) Reset() {
+}
+
+func (sess *Session) sendDeferred() {
+	sess.logger.Debugf("sendDeferred")
+	for {
+		select {
+		case item := <-sess.writeDeferChan:
+			_, err := sess.WriteMessage(item.MsgType, item.Payload)
+			if err != nil {
+				sess.logger.Error(err)
+			}
+		default:
+			return
+		}
+	}
+}
+
 func (sess *Session) WriteMessage(msgType MessageType, payload []byte) (int, error) {
 	if len(payload) > maxPayloadSize {
 		return -1, errors.Wrap(ErrTooBig)
+	}
+
+	fmt.Println(msgType, payload)
+
+	shouldBreak := false
+	sess.LockDo(func() {
+		if sess.cipher == nil && msgType != MessageType_keyExchange {
+			item := newWriteItem()
+			item.MsgType = msgType
+			item.Payload = item.Payload[:len(payload)]
+			copy(item.Payload, payload)
+			go func(item *writeItem) {
+				sess.writeDeferChan <- item
+			}(item)
+			shouldBreak = true
+			return
+		}
+	})
+	if shouldBreak {
+		return len(payload), nil
 	}
 
 	msg := newMessageHeaders()
@@ -299,11 +369,13 @@ func (sess *Session) WriteMessage(msgType MessageType, payload []byte) (int, err
 		n, err = sess.backend.Write(plain.Bytes())
 	} else {
 		encrypted := newBytesBuffer()
-		plainBytes := plain.Bytes()
+		size := roundSize(plain.Len(), aes.BlockSize)
+		plain.Grow(size)
+		plainBytes := plain.Bytes()[:size]
 
-		encryptedBytes := encrypted.Bytes()[:roundSize(len(plainBytes), aes.BlockSize)]
+		encryptedBytes := encrypted.Bytes()[:size]
 		sess.cipher.Encrypt(encryptedBytes, plainBytes)
-		n, err = sess.Write(encryptedBytes)
+		n, err = sess.backend.Write(encryptedBytes)
 		encrypted.Release()
 	}
 	plain.Release()
@@ -318,27 +390,15 @@ func (sess *Session) startKeyExchange() {
 
 	sess.keyExchanger = newKeyExchanger(sess.identity, sess.remoteIdentity, sess.NewMessenger(MessageType_keyExchange), func(secret []byte) {
 		// ok
+		sess.logger.Debugf("got key: %v", secret)
 		sess.setSecret(secret)
 		sess.setState(SessionState_established)
+		sess.sendDeferred()
 	}, func(err error) {
 		// got error
 		_ = sess.Close()
-		sess.LogError(errors.Wrap(err))
+		sess.logger.Error(errors.Wrap(err))
 	})
-}
-
-func (sess *Session) LogError(err error) {
-	if sess.logger == nil {
-		return
-	}
-	sess.logger.Error(err)
-}
-
-func (sess *Session) LogInfo(fmt string, args ...interface{}) {
-	if sess.logger == nil {
-		return
-	}
-	sess.logger.Infof(fmt, args...)
 }
 
 func (sess *Session) setMessenger(msgType MessageType, messenger *Messenger) {
