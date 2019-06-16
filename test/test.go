@@ -34,7 +34,7 @@ type testLogger struct {
 	string
 }
 
-func (l *testLogger) Error(err error) {
+func (l *testLogger) Error(sess *secureio.Session, err error) {
 	fmt.Print(err)
 }
 func (l *testLogger) Infof(fm string, args ...interface{}) {

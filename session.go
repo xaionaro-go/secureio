@@ -144,7 +144,7 @@ func (sess *Session) readerLoop() {
 		sess.logger.Debugf("/n, err := sess.backend.Read(inputBuffer): %v %v", n, err)
 		if err != nil {
 			_ = sess.Close()
-			sess.logger.Error(errors.Wrap(err))
+			sess.logger.Error(sess, errors.Wrap(err))
 			continue
 		}
 
@@ -160,7 +160,7 @@ func (sess *Session) readerLoop() {
 		if sess.messenger[hdr.Type] != nil {
 			if err := sess.messenger[hdr.Type].Handle(payload); err != nil {
 				_ = sess.Close()
-				sess.logger.Error(errors.Wrap(err))
+				sess.logger.Error(sess, errors.Wrap(err))
 				continue
 			}
 		} else {
@@ -299,7 +299,7 @@ func (sess *Session) sendDeferred() {
 		case item := <-sess.writeDeferChan:
 			_, err := sess.WriteMessage(item.MsgType, item.Payload)
 			if err != nil {
-				sess.logger.Error(err)
+				sess.logger.Error(sess, err)
 			}
 		default:
 			return
@@ -398,7 +398,7 @@ func (sess *Session) startKeyExchange() {
 	}, func(err error) {
 		// got error
 		_ = sess.Close()
-		sess.logger.Error(errors.Wrap(err))
+		sess.logger.Error(sess, errors.Wrap(err))
 	})
 }
 

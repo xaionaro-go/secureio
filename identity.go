@@ -25,7 +25,7 @@ var (
 )
 
 type Logger interface {
-	Error(error)
+	Error(*Session, error)
 	Infof(string, ...interface{})
 	Debugf(string, ...interface{})
 }
@@ -57,6 +57,12 @@ func NewIdentity(keysDir string) (*Identity, error) {
 func NewRemoteIdentity(keyPath string) (*Identity, error) {
 	i := &Identity{}
 	return i, loadPublicKeyFromFile(&i.Keys.Public, keyPath)
+}
+
+func NewRemoteIdentityFromPublicKey(pubKey ed25519.PublicKey) *Identity {
+	i := &Identity{}
+	i.Keys.Public = pubKey
+	return i
 }
 
 func (i *Identity) savePublicKey(keysDir string) error {
