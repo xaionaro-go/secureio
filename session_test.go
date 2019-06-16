@@ -1,4 +1,4 @@
-package cryptofilter
+package secureio
 
 import (
 	"io"
@@ -41,7 +41,7 @@ func (l *testLogger) Debugf(fmt string, args ...interface{}) {
 }
 
 func TestSession(t *testing.T) {
-	dir := `/tmp/.test_xaionaro-go_cryptofilter_session_`
+	dir := `/tmp/.test_xaionaro-go_secureio_session_`
 	_ = os.Mkdir(dir+"0", 0700)
 	_ = os.Mkdir(dir+"1", 0700)
 	identity0, err := NewIdentity(dir + "0")

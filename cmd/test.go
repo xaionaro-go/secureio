@@ -5,7 +5,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/xaionaro-go/cryptofilter"
+	"github.com/xaionaro-go/secureio"
 )
 
 type pipeReadWriter struct {
@@ -52,13 +52,13 @@ func fatalError(err error) {
 }
 
 func main() {
-	dir := `/tmp/.test_xaionaro-go_cryptofilter_session_`
+	dir := `/tmp/.test_xaionaro-go_secureio_session_`
 	_ = os.Mkdir(dir+"0", 0700)
 	_ = os.Mkdir(dir+"1", 0700)
-	identity0, err := cryptofilter.NewIdentity(dir + "0")
+	identity0, err := secureio.NewIdentity(dir + "0")
 	fatalError(err)
 
-	identity1, err := cryptofilter.NewIdentity(dir + "1")
+	identity1, err := secureio.NewIdentity(dir + "1")
 	fatalError(err)
 
 	pipeR0, pipeW0, err := os.Pipe()

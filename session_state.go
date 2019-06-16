@@ -1,4 +1,4 @@
-package cryptofilter
+package secureio
 
 import (
 	mathRand "math/rand"

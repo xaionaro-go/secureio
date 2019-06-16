@@ -1,4 +1,4 @@
-package cryptofilter
+package secureio
 
 import (
 	"bytes"
@@ -158,7 +158,11 @@ func (sess *Session) readerLoop() {
 		item.Data = item.Data[0:hdr.Length]
 		copy(item.Data, payload)
 		if sess.messenger[hdr.Type] != nil {
-			sess.messenger[hdr.Type].Handle(payload)
+			if err := sess.messenger[hdr.Type].Handle(payload); err != nil {
+				_ = sess.Close()
+				sess.logger.Error(errors.Wrap(err))
+				continue
+			}
 		} else {
 			sess.ReadChan[hdr.Type] <- item
 		}

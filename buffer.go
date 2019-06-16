@@ -1,4 +1,4 @@
-package cryptofilter
+package secureio
 
 type Buffer struct {
 	Bytes  []byte
