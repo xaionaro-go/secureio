@@ -13,7 +13,7 @@ session := identity.NewSession(remoteIdentity, conn, someLogger)
 
 // Use it!
 
-// Write to read
+// Write to it
 session.Write(someData)
 
 // Or/and read from it
