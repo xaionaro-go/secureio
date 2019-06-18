@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	mathrand "math/rand"
 	"sync"
 	"time"
 
@@ -75,11 +76,16 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 		if err != nil {
 			return
 		}
-		if err := kx.remoteIdentity.VerifySignature(msg.Signature[:], msg.PublicKey[:]); err != nil {
+		if err = kx.remoteIdentity.VerifySignature(msg.Signature[:], msg.PublicKey[:]); err != nil {
 			kx.messenger.sess.logger.Debugf("wrong signature: %v", err)
 			return
 		}
-		nextKey, genErr := kx.generateSharedKey(kx.nextLocalPrivateKey, &msg.PublicKey)
+		nextLocal := kx.nextLocalPrivateKey
+		if nextLocal == nil {
+			return // Not ready, yet. It's required to call UpdateKey(), first
+		}
+		nextRemote := &msg.PublicKey
+		nextKey, genErr := kx.generateSharedKey(nextLocal, nextRemote)
 		if genErr != nil {
 			kx.errFunc(errors.Wrap(genErr))
 			_ = kx.Close()
@@ -87,16 +93,22 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 		}
 		kx.okFunc(nextKey)
 		kx.lastExchangeTS = time.Now()
+
+		if mathrand.Intn(4) == 0 { // every 4th time resend our data (it seems the remote side didn't receive it if it sends the message 4 times)
+			err := kx.sendPublicKey()
+			if err != nil {
+				_ = kx.Close()
+				kx.errFunc(errors.Wrap(err))
+				return
+			}
+		}
 	})
-	if err != nil {
-		_ = kx.Close()
-		kx.errFunc(errors.Wrap(err))
-	}
 	return
 }
 
 func (kx *keyExchanger) Close() error {
 	kx.stop()
+	kx.messenger.sess.logger.Debugf("key exchanger closed")
 	return nil
 }
 
@@ -149,8 +161,7 @@ func (kx *keyExchanger) loop() {
 func (kx *keyExchanger) sendPublicKey() error {
 	msg := &kx.localKeySeedUpdateMessage
 	copy(msg.PublicKey[:], (*kx.nextLocalPublicKey)[:])
-	sign := ed25519.Sign(kx.localIdentity.Keys.Private, msg.PublicKey[:])
-	copy(msg.Signature[:], sign)
+	kx.localIdentity.Sign(msg.Signature[:], msg.PublicKey[:])
 	return kx.send(msg)
 }
 

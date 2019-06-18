@@ -173,3 +173,8 @@ func (i *Identity) VerifySignature(signature, data []byte) error {
 	}
 	return nil
 }
+
+func (i *Identity) Sign(signature, data []byte) {
+	result := ed25519.Sign(i.Keys.Private, data)
+	copy(signature, result)
+}
