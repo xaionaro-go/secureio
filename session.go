@@ -22,6 +22,10 @@ const (
 )
 
 var (
+	ErrUnencrypted = e.New(`unencrypted message`)
+)
+
+var (
 	maxPacketSize = roundSize(maxPayloadSize+int(messageHeadersSize), cipherBlockSize)
 )
 
@@ -36,8 +40,8 @@ var (
 	ErrAlreadyClosed   = e.New("already closed")
 	ErrInvalidChecksum = e.New("invalid checksum (or invalid encryption key)")
 	ErrCannotDecrypt   = e.New("cannot decrypt")
-	ErrInvalidLength   = errors.New("invalid length")
-	ErrEmptyInput      = errors.New("empty input")
+	ErrInvalidLength   = e.New("invalid length")
+	ErrEmptyInput      = e.New("empty input")
 )
 
 type Checksumer interface {
@@ -166,7 +170,7 @@ func (sess *Session) readerLoop() {
 
 		hdr, payload, err := sess.decrypt(&decryptedBuffer, inputBuffer[:n])
 		sess.logger.Debugf("%v %v %v", hdr, payload, err)
-		if err != nil {
+		if err != nil && (err != ErrUnencrypted || hdr.Type != MessageType_keyExchange) {
 			err = errors.Wrap(err)
 			sess.logger.Infof("cannot decrypt: %v", err)
 			cannotDecryptCount++
@@ -217,30 +221,48 @@ func (sess *Session) decrypt(decrypted *Buffer, encrypted []byte) (*messageHeade
 	}
 
 	if len(decrypted.Bytes) < decrypted.Offset {
-		return nil, nil, ErrEmptyInput.Wrap(len(decrypted.Bytes), decrypted.Offset)
+		return nil, nil, errors.Wrap(ErrEmptyInput, len(decrypted.Bytes), decrypted.Offset)
 	}
 
-	if err := sess.checkChecksum(hdr, decrypted); err != nil {
+	err = sess.checkChecksum(hdr, decrypted)
+	if err == nil {
+		return hdr, decrypted.Bytes[decrypted.Offset:], nil
+	}
+
+	var err2 error
+	if sess.previousCipher != nil {
 		decrypted.Reset()
 		decrypted.Grow(len(encrypted))
-		if sess.previousCipher == nil {
-			copy(decrypted.Bytes, encrypted)
-		} else {
-			cipherDo(sess.previousCipher.Decrypt, decrypted.Bytes, encrypted)
-		}
 
-		if err2 := binary.Read(decrypted, binaryOrderType, hdr); err2 != nil {
+		cipherDo(sess.previousCipher.Decrypt, decrypted.Bytes, encrypted)
+
+		if err2 = binary.Read(decrypted, binaryOrderType, hdr); err2 != nil {
 			hdr.Release()
 			return nil, nil, errors.Wrap(err, err2)
 		}
 
-		if err2 := sess.checkChecksum(hdr, decrypted); err2 != nil {
-			hdr.Release()
-			return nil, nil, errors.Wrap(ErrCannotDecrypt, err, err2)
+		if err2 = sess.checkChecksum(hdr, decrypted); err2 == nil {
+			return hdr, decrypted.Bytes[decrypted.Offset:], nil
 		}
 	}
 
-	return hdr, decrypted.Bytes[decrypted.Offset:], nil
+	decrypted.Reset()
+	decrypted.Grow(len(encrypted))
+	copy(decrypted.Bytes, encrypted)
+
+	err3 := binary.Read(decrypted, binaryOrderType, hdr)
+	if err3 != nil {
+		hdr.Release()
+		return nil, nil, errors.Wrap(err, err2, err3)
+	}
+
+	err3 = sess.checkChecksum(hdr, decrypted)
+	if err3 == nil {
+		return hdr, decrypted.Bytes[decrypted.Offset:], ErrUnencrypted
+	}
+
+	hdr.Release()
+	return nil, nil, errors.Wrap(ErrCannotDecrypt, err, err2, err3)
 }
 
 func (sess *Session) checkChecksum(hdr *messageHeaders, decrypted *Buffer) error {
@@ -405,7 +427,7 @@ func (sess *Session) WriteMessage(msgType MessageType, payload []byte) (int, err
 	}
 
 	sess.logger.Debugf("sess.cipher == nil: %v", sess.cipher == nil)
-	if sess.cipher == nil {
+	if sess.cipher == nil || msg.Type == MessageType_keyExchange {
 		n, err = sess.backend.Write(plain.Bytes())
 	} else {
 		encrypted := newBytesBuffer()

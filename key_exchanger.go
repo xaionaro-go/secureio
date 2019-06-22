@@ -94,7 +94,7 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 		kx.okFunc(nextKey)
 		kx.lastExchangeTS = time.Now()
 
-		if mathrand.Intn(4) == 0 { // every 4th time resend our data (it seems the remote side didn't receive it if it sends the message 4 times)
+		if mathrand.Intn(2) == 0 { // every 2th time resend our data (it seems the remote side didn't receive it if keeps sending us this messages)
 			err := kx.sendPublicKey()
 			if err != nil {
 				_ = kx.Close()
