@@ -25,6 +25,7 @@ var (
 )
 
 type Logger interface {
+	OnConnect(*Session)
 	Error(*Session, error)
 	Infof(string, ...interface{})
 	Debugf(string, ...interface{})

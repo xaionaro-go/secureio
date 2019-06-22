@@ -457,6 +457,7 @@ func (sess *Session) startKeyExchange() {
 		sess.setSecret(secret)
 		sess.setState(SessionState_established, SessionState_keyExchanging)
 		sess.sendDeferred()
+		sess.logger.OnConnect(sess)
 	}, func(err error) {
 		// got error
 		_ = sess.Close()
