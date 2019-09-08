@@ -2,6 +2,7 @@ package secureio
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
@@ -42,6 +43,7 @@ var (
 	ErrCannotDecrypt   = e.New("cannot decrypt")
 	ErrInvalidLength   = e.New("invalid length")
 	ErrEmptyInput      = e.New("empty input")
+	ErrClosed          = e.New("closed")
 )
 
 type Checksumer interface {
@@ -63,14 +65,17 @@ func (it *ReadItem) Release() {
 type Session struct {
 	locker sync.RWMutex
 
+	ctx            context.Context
+	cancelFunc     context.CancelFunc
 	state          SessionState
 	identity       *Identity
 	remoteIdentity *Identity
+	psk            []byte
 	keyExchanger   *keyExchanger
 	backend        io.ReadWriteCloser
 	messenger      [MessageTypeMax]*Messenger
 	ReadChan       [MessageTypeMax]chan *ReadItem
-	closeChan      chan struct{}
+	currentSecret  []byte
 	cipher         cipher.Block
 	previousCipher cipher.Block
 	logger         Logger
@@ -107,16 +112,25 @@ var (
 	}
 )
 
-func newSession(identity, remoteIdentity *Identity, backend io.ReadWriteCloser, logger Logger) *Session {
+func newSession(
+	ctx context.Context,
+	identity, remoteIdentity *Identity,
+	backend io.ReadWriteCloser,
+	logger Logger,
+	psk []byte,
+) *Session {
+
 	sess := &Session{
 		identity:       identity,
 		remoteIdentity: remoteIdentity,
-		closeChan:      make(chan struct{}),
+		psk:            psk,
 		state:          SessionState_new,
 		backend:        backend,
 		logger:         logger,
 		writeDeferChan: make(chan *writeItem, 1024),
 	}
+
+	sess.ctx, sess.cancelFunc = context.WithCancel(ctx)
 
 	for i := 0; i < MessageTypeMax; i++ {
 		sess.ReadChan[i] = make(chan *ReadItem, messageQueueLength)
@@ -136,23 +150,47 @@ func (sess *Session) startReader() {
 	go sess.readerLoop()
 }
 
+func (sess *Session) isDone() bool {
+	select {
+	case <-sess.ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
 func (sess *Session) readerLoop() {
 	cannotDecryptCount := 0
 	var inputBuffer = make([]byte, maxPacketSize)
 	var decryptedBuffer Buffer
 	decryptedBuffer.Grow(maxPacketSize)
+	go func() {
+		select {
+		case <-sess.ctx.Done():
+		}
+
+		err := errors.Wrap(sess.backend.Close())
+		if err != nil {
+			sess.logger.Error(sess, err)
+		}
+
+		sess.setState(SessionState_closed)
+
+		for _, messenger := range sess.messenger {
+			if messenger == nil {
+				continue
+			}
+			_ = messenger.Close()
+		}
+		for i := 0; i < MessageTypeMax; i++ {
+			close(sess.ReadChan[i])
+		}
+		sess.logger.Debugf("secureio session closed")
+	}()
+
 	for {
 		select {
-		case <-sess.closeChan:
-			close(sess.closeChan)
-			sess.setState(SessionState_closed)
-			for _, messenger := range sess.messenger {
-				if messenger == nil {
-					continue
-				}
-				_ = messenger.Close()
-			}
-			sess.logger.Debugf("secureio session closed")
+		case <-sess.ctx.Done():
 			return
 		default:
 		}
@@ -451,18 +489,26 @@ func (sess *Session) startKeyExchange() {
 		return
 	}
 
-	sess.keyExchanger = newKeyExchanger(sess.identity, sess.remoteIdentity, sess.NewMessenger(MessageType_keyExchange), func(secret []byte) {
-		// ok
-		sess.logger.Debugf("got key: %v", secret)
-		sess.setSecret(secret)
-		sess.setState(SessionState_established, SessionState_keyExchanging)
-		sess.sendDeferred()
-		sess.logger.OnConnect(sess)
-	}, func(err error) {
-		// got error
-		_ = sess.Close()
-		sess.logger.Error(sess, errors.Wrap(err))
-	})
+	sess.keyExchanger = newKeyExchanger(
+		sess.ctx,
+		sess.identity,
+		sess.remoteIdentity,
+		sess.psk,
+		sess.NewMessenger(MessageType_keyExchange), func(secret []byte) {
+			// ok
+			sess.logger.Debugf("got key: %v", secret)
+			sess.setSecret(secret)
+			sess.setState(SessionState_established, SessionState_keyExchanging)
+
+			sess.logger.OnConnect(sess)
+
+			sess.sendDeferred()
+		}, func(err error) {
+			// got error
+			_ = sess.Close()
+			sess.logger.Error(sess, errors.Wrap(err))
+		},
+	)
 }
 
 func (sess *Session) setMessenger(msgType MessageType, messenger *Messenger) {
@@ -481,7 +527,11 @@ func (sess *Session) setSecret(newSecret []byte) {
 	sess.LockDo(func() {
 		sess.previousCipher = sess.cipher
 		var err error
-		key := newSecret[:cipherBlockSize]
+		key := make([]byte, cipherBlockSize)
+		for i := 0; i < len(newSecret); i++ {
+			key[i%cipherBlockSize] ^= newSecret[i]
+		}
+		sess.currentSecret = key
 		sess.cipher, err = aes.NewCipher(key)
 		sess.logger.Debugf("new cipher with key: %v", key)
 		if err != nil {
@@ -492,6 +542,9 @@ func (sess *Session) setSecret(newSecret []byte) {
 
 func (sess *Session) read(p []byte) (int, error) {
 	item := <-sess.ReadChan[MessageType_dataPacketType0]
+	if item == nil {
+		return -1, errors.Wrap(ErrClosed)
+	}
 	if len(p) < len(item.Data) {
 		return -1, errors.Wrap(ErrTooBig)
 	}
@@ -544,12 +597,10 @@ func (sess *Session) Close() error {
 	case SessionState_closed, SessionState_closing:
 		return errors.Wrap(ErrAlreadyClosed)
 	}
-	go func() {
-		sess.closeChan <- struct{}{}
-		err := errors.Wrap(sess.backend.Close())
-		if err != nil {
-			sess.logger.Error(sess, err)
-		}
-	}()
+	sess.cancelFunc()
 	return nil
+}
+
+func (sess *Session) GetEphemeralKey() []byte {
+	return sess.currentSecret
 }

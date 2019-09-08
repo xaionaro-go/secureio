@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -43,6 +44,8 @@ func (l *testLogger) Infof(fm string, args ...interface{}) {
 func (l *testLogger) Debugf(fm string, args ...interface{}) {
 	fmt.Printf(l.string+" [D] "+fm+"\n", args...)
 }
+func (l *testLogger) OnConnect(*secureio.Session) {
+}
 
 func fatalError(err error) {
 	if err == nil {
@@ -79,8 +82,10 @@ func main() {
 		Writer: pipeW0,
 	}
 
-	sess0 := identity0.NewSession(identity1, conn0, &testLogger{"0"})
-	sess1 := identity1.NewSession(identity0, conn1, &testLogger{"1"})
+	ctx := context.Background()
+
+	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{"0"})
+	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{"1"})
 
 	fmt.Println("write")
 

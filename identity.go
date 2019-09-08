@@ -1,6 +1,8 @@
 package secureio
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/pem"
 	"fmt"
@@ -10,7 +12,6 @@ import (
 	"path/filepath"
 
 	"github.com/pkg/errors"
-
 	"golang.org/x/crypto/ed25519"
 )
 
@@ -53,6 +54,13 @@ type Identity struct {
 func NewIdentity(keysDir string) (*Identity, error) {
 	i := &Identity{}
 	return i, i.prepareKeys(keysDir)
+}
+
+func NewIdentityFromPrivateKey(privKey ed25519.PrivateKey) *Identity {
+	i := &Identity{}
+	i.Keys.Private = privKey
+	i.Keys.Public = privKey.Public().(ed25519.PublicKey)
+	return i
 }
 
 func NewRemoteIdentity(keyPath string) (*Identity, error) {
@@ -164,8 +172,71 @@ func (i *Identity) prepareKeys(keysDir string) error {
 	return errors.Wrap(err, "Cannot load keys")
 }
 
-func (i *Identity) NewSession(remoteIdentity *Identity, backend io.ReadWriteCloser, logger Logger) *Session {
-	return newSession(i, remoteIdentity, backend, logger)
+func (i *Identity) NewSession(
+	ctx context.Context,
+	remoteIdentity *Identity,
+	backend io.ReadWriteCloser,
+	logger Logger,
+) *Session {
+	return i.NewSessionWithPSK(ctx, remoteIdentity, backend, logger, nil)
+}
+
+func (i *Identity) NewSessionWithPSK(
+	ctx context.Context,
+	remoteIdentity *Identity,
+	backend io.ReadWriteCloser,
+	logger Logger,
+	psk []byte,
+) *Session {
+	return newSession(ctx, i, remoteIdentity, backend, logger, psk)
+}
+
+func (i *Identity) MutualConfirmationOfIdentity(
+	ctx context.Context,
+	remoteIdentity *Identity,
+	backend io.ReadWriteCloser,
+	logger Logger,
+) (err error, ephemeralKey []byte) {
+	return i.MutualConfirmationOfIdentityWithPSK(ctx, remoteIdentity, backend, logger, nil)
+}
+
+func (i *Identity) MutualConfirmationOfIdentityWithPSK(
+	ctx context.Context,
+	remoteIdentity *Identity,
+	backend io.ReadWriteCloser,
+	logger Logger,
+	psk []byte,
+) (err error, ephemeralKey []byte) {
+	var n int
+
+	sess := newSession(ctx, i, remoteIdentity, backend, logger, psk)
+
+	n, err = sess.Write(i.Keys.Public)
+	if err != nil {
+		return
+	}
+	if n != len(i.Keys.Public) {
+		err = errors.Wrap(ErrPartialWrite, `unable to send my public key`)
+		return
+	}
+
+	remotePubKey := make([]byte, len(remoteIdentity.Keys.Public))
+	n, err = sess.Read(remotePubKey)
+	if err != nil {
+		return
+	}
+	if n != len(i.Keys.Public) {
+		err = errors.Wrap(ErrInvalidLength, `unable to receive remote public key`)
+		return
+	}
+
+	if bytes.Compare(remoteIdentity.Keys.Public, remotePubKey) != 0 {
+		err = errors.Wrap(ErrInvalidSignature, `unexpected error`)
+		return
+	}
+
+	ephemeralKey = sess.GetEphemeralKey()
+	return
 }
 
 func (i *Identity) VerifySignature(signature, data []byte) error {

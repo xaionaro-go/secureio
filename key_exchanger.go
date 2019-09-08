@@ -2,6 +2,7 @@ package secureio
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	mathrand "math/rand"
@@ -9,8 +10,9 @@ import (
 	"time"
 
 	"github.com/wsddn/go-ecdh"
-	"github.com/xaionaro-go/errors"
 	"golang.org/x/crypto/ed25519"
+
+	"github.com/xaionaro-go/errors"
 )
 
 const (
@@ -30,9 +32,11 @@ var (
 
 type keyExchanger struct {
 	locker                     sync.Mutex
+	ctx                        context.Context
+	cancelFunc                 func()
 	okFunc                     func([]byte)
 	errFunc                    func(error)
-	stopChan                   chan struct{}
+	psk                        []byte
 	lastExchangeTS             time.Time
 	nextLocalPrivateKey        *[PrivateKeySize]byte
 	nextLocalPublicKey         *[PublicKeySize]byte
@@ -44,16 +48,24 @@ type keyExchanger struct {
 	ecdh                       ecdh.ECDH
 }
 
-func newKeyExchanger(localIdentity *Identity, remoteIdentity *Identity, messenger *Messenger, okFunc func([]byte), errFunc func(error)) *keyExchanger {
+func newKeyExchanger(
+	ctx context.Context,
+	localIdentity *Identity,
+	remoteIdentity *Identity,
+	psk []byte,
+	messenger *Messenger,
+	okFunc func([]byte), errFunc func(error),
+) *keyExchanger {
 	kx := &keyExchanger{
 		okFunc:         okFunc,
 		errFunc:        errFunc,
-		stopChan:       make(chan struct{}),
 		localIdentity:  localIdentity,
 		remoteIdentity: remoteIdentity,
+		psk:            psk,
 		messenger:      messenger,
 		ecdh:           ecdh.NewCurve25519ECDH(),
 	}
+	kx.ctx, kx.cancelFunc = context.WithCancel(ctx)
 	messenger.SetHandler(kx)
 	kx.start()
 	return kx
@@ -66,7 +78,31 @@ func (kx *keyExchanger) LockDo(fn func()) {
 }
 
 func (kx *keyExchanger) generateSharedKey(localPrivateKey *[PrivateKeySize]byte, remotePublicKey *[PublicKeySize]byte) ([]byte, error) {
-	return kx.ecdh.GenerateSharedSecret(localPrivateKey, remotePublicKey)
+	key, err := kx.ecdh.GenerateSharedSecret(localPrivateKey, remotePublicKey)
+	if err != nil {
+		return nil, err
+	}
+
+	for start := 0; start < len(kx.psk); start += len(key) {
+		end := start + len(key)
+		if end > len(kx.psk) {
+			end = len(kx.psk)
+		}
+		for i := start; i < end; i++ {
+			key[i-start] ^= kx.psk[i]
+		}
+	}
+
+	return key, err
+}
+
+func (kx *keyExchanger) isDone() bool {
+	select {
+	case <-kx.ctx.Done():
+		return true
+	default:
+		return false
+	}
 }
 
 func (kx *keyExchanger) Handle(b []byte) (err error) {
@@ -87,8 +123,10 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 		nextRemote := &msg.PublicKey
 		nextKey, genErr := kx.generateSharedKey(nextLocal, nextRemote)
 		if genErr != nil {
-			kx.errFunc(errors.Wrap(genErr))
 			_ = kx.Close()
+			if genErr.(errors.SmartError).OriginalError() != ErrAlreadyClosed || !kx.isDone() {
+				kx.errFunc(errors.Wrap(genErr))
+			}
 			return
 		}
 		kx.okFunc(nextKey)
@@ -98,7 +136,9 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 			err := kx.sendPublicKey()
 			if err != nil {
 				_ = kx.Close()
-				kx.errFunc(errors.Wrap(err))
+				if err.(errors.SmartError).OriginalError() != ErrAlreadyClosed || !kx.isDone() {
+					kx.errFunc(errors.Wrap(err))
+				}
 				return
 			}
 		}
@@ -113,7 +153,7 @@ func (kx *keyExchanger) Close() error {
 }
 
 func (kx *keyExchanger) stop() {
-	kx.stopChan <- struct{}{}
+	kx.cancelFunc()
 }
 
 func (kx *keyExchanger) start() {
@@ -148,9 +188,8 @@ func (kx *keyExchanger) loop() {
 	sendPublicKeyTicker := time.NewTicker(time.Second)
 	for {
 		select {
-		case <-kx.stopChan:
+		case <-kx.ctx.Done():
 			_ = kx.messenger.Close()
-			close(kx.stopChan)
 			return
 		case <-sendPublicKeyTicker.C:
 			kx.iterate()
