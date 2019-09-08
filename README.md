@@ -11,7 +11,7 @@ remoteIdentity, err := secureio.NewRemoteIdentity(`/home/user/.somedir/remote.pu
 conn, _ := net.Dial("udp", "10.0.0.2:1234")
 
 // Create encrypted connection (exchange keys using ECDH and verify remote side by Curve25519 signature).
-session := identity.NewSession(remoteIdentity, conn, someLogger)
+session := identity.NewSession(context.Background(), remoteIdentity, conn, someLogger)
 
 // Use it!
 
