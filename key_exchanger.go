@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
-	mathrand "math/rand"
 	"sync"
 	"time"
 
@@ -168,17 +167,6 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 		}
 		kx.okFunc(nextKey)
 		kx.lastExchangeTS = time.Now()
-
-		if mathrand.Intn(2) == 0 { // every 2th time resend our data (it seems the remote side didn't receive it if keeps sending us this messages)
-			err := kx.sendPublicKey()
-			if err != nil {
-				_ = kx.Close()
-				if err.(*errors.Error).Err != ErrAlreadyClosed || !kx.isDone() {
-					kx.errFunc(errors.Wrap(err))
-				}
-				return
-			}
-		}
 	})
 	return
 }

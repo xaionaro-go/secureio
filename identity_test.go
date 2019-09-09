@@ -84,6 +84,7 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 			ctx,
 			identity1,
 			conn0,
+			//&dummyEventHandler{},
 			&testLogger{"0", t, false, true, nil},
 			opts0,
 		)
@@ -98,6 +99,7 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 			ctx,
 			identity0,
 			conn1,
+			//&dummyEventHandler{},
 			&testLogger{"1", t, false, true, nil},
 			opts1,
 		)

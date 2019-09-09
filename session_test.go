@@ -2,8 +2,10 @@ package secureio
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"math/rand"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,9 +21,9 @@ func TestSession(t *testing.T) {
 	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{"0", t, true, false, nil}, nil)
 	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{"1", t, true, false, nil}, nil)
 
-	writeBuf := make([]byte, 65536-messageHeadersSize)
+	writeBuf := make([]byte, maxPayloadSize)
 	rand.Read(writeBuf)
-	readBuf := make([]byte, 65536-messageHeadersSize)
+	readBuf := make([]byte, maxPayloadSize)
 
 	_, err := sess0.Write(writeBuf)
 	assert.NoError(t, err)
@@ -33,6 +35,9 @@ func TestSession(t *testing.T) {
 
 	assert.NoError(t, sess0.Close())
 	assert.NoError(t, sess1.Close())
+
+	sess0.WaitForClosure()
+	sess1.WaitForClosure()
 
 	assert.True(t, sess0.isDone())
 	assert.True(t, sess1.isDone())
@@ -47,8 +52,8 @@ func BenchmarkSessionWriteRead16(b *testing.B) {
 func BenchmarkSessionWriteRead1024(b *testing.B) {
 	benchmarkSessionWriteRead(b, 1024)
 }
-func BenchmarkSessionWriteRead65000(b *testing.B) {
-	benchmarkSessionWriteRead(b, 65000)
+func BenchmarkSessionWriteRead32000(b *testing.B) {
+	benchmarkSessionWriteRead(b, 32000)
 }
 func benchmarkSessionWriteRead(b *testing.B, blockSize uint) {
 	ctx := context.Background()
@@ -60,13 +65,21 @@ func benchmarkSessionWriteRead(b *testing.B, blockSize uint) {
 		if xerr.Has(io.EOF) {
 			return
 		}
+		if pathErr, ok := xerr.Deepest().Err.(*os.PathError); ok {
+			panic(fmt.Sprintf("%v %v", pathErr.Err, pathErr.Err))
+		}
 		panic(xerr)
 	})
 
 	sess0 := identity0.NewSession(ctx, identity1, conn0, eventHandler, nil)
 	sess1 := identity1.NewSession(ctx, identity0, conn1, eventHandler, nil)
-	defer sess0.Close()
-	defer sess1.Close()
+	defer func() {
+		b.StopTimer()
+		sess0.Close()
+		sess1.Close()
+		sess0.WaitForClosure()
+		sess1.WaitForClosure()
+	}()
 
 	writeBuf := make([]byte, blockSize)
 	rand.Read(writeBuf)

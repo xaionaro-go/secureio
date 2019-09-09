@@ -14,7 +14,7 @@ var (
 )
 
 const (
-	maxPayloadSize = 1 << 16
+	maxPayloadSize = 1 << 15
 )
 
 type MessageType uint16

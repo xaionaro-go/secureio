@@ -6,7 +6,6 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"runtime/debug"
 	"testing"
 
 	"github.com/xaionaro-go/errors"
@@ -25,21 +24,19 @@ func (l *testLogger) Error(sess *Session, err error) {
 	if xerr.Has(io.EOF) {
 		return
 	}
-	l.T.Errorf("T:%v:SID:%v", l.T.Name(), sess.ID())
-	l.T.Error(xerr)
-	l.T.Errorf("STACK: %v", string(debug.Stack()))
+	l.T.Errorf("E:%v:SID:%v:%v", l.T.Name(), sess.ID(), xerr)
 }
 func (l *testLogger) Infof(format string, args ...interface{}) {
 	if !l.enableInfo {
-		fmt.Printf("T:%v:SID:%v: ", l.T.Name(), l.Session.ID())
-		fmt.Printf(format+"\n", args...)
+		fmt.Printf("I:%v:SID:%v: "+format+"\n",
+			append([]interface{}{l.T.Name(), l.Session.ID()}, args...)...)
 		return
 	}
 	l.T.Errorf(l.string+" [I] "+format, args...)
 }
 func (l *testLogger) Debugf(format string, args ...interface{}) {
-	fmt.Printf("T:%v:SID:%v: ", l.T.Name(), l.Session.ID())
-	fmt.Printf(format+"\n", args...)
+	fmt.Printf("D:%v:SID:%v: "+format+"\n",
+		append([]interface{}{l.T.Name(), l.Session.ID()}, args...)...)
 }
 func (l *testLogger) OnConnect(sess *Session) {
 }

@@ -697,7 +697,7 @@ func (sess *Session) Read(p []byte) (int, error) {
 }
 
 func (sess *Session) write(raw []byte) (int, error) {
-	if len(raw)+messageHeadersSize > maxPayloadSize {
+	if len(raw) > maxPayloadSize {
 		return -1, errors.Wrap(ErrTooBig)
 	}
 	return sess.WriteMessage(MessageType_dataPacketType0, raw)
