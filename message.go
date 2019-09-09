@@ -1,19 +1,23 @@
 package secureio
 
 import (
-	"encoding/binary"
 	"hash"
 	"hash/crc32"
+	"io"
 	"sync"
 
 	"github.com/xaionaro-go/errors"
 )
 
-const (
-	maxPayloadSize = 1024
+var (
+	ErrTooShort = errors.New(`too short`)
 )
 
-type MessageType uint8
+const (
+	maxPayloadSize = 1 << 16
+)
+
+type MessageType uint16
 
 const (
 	MessageType_undefined = iota
@@ -42,7 +46,7 @@ type messageHeaders struct {
 	isBusy bool
 }
 
-var messageHeadersSize = binary.Size(messageHeaders{})
+var messageHeadersSize = 2 + 2 + 4
 
 func (msg *messageHeadersData) Reset() {
 	msg.Type = MessageType_undefined
@@ -110,11 +114,45 @@ var (
 	}
 )
 
+func (hdr *messageHeadersData) Read(b []byte) (int, error) {
+	if len(b) < messageHeadersSize {
+		return 0, errors.Wrap(ErrTooShort)
+	}
+	hdr.Type = MessageType(binaryOrderType.Uint16(b[0:]))
+	hdr.Length = binaryOrderType.Uint16(b[2:])
+	hdr.Checksum = binaryOrderType.Uint32(b[4:])
+
+	return messageHeadersSize, nil
+}
+
+func (hdr *messageHeadersData) Write(b []byte) (int, error) {
+	if len(b) < messageHeadersSize {
+		return 0, errors.Wrap(ErrTooShort)
+	}
+
+	binaryOrderType.PutUint16(b[0:], uint16(hdr.Type))
+	binaryOrderType.PutUint16(b[2:], uint16(hdr.Length))
+	binaryOrderType.PutUint32(b[4:], uint32(hdr.Checksum))
+
+	return messageHeadersSize, nil
+}
+
+func (hdr *messageHeadersData) WriteTo(w io.Writer) (int, error) {
+	var buf [8]byte
+
+	n, err := hdr.Write(buf[:])
+	if err != nil {
+		return n, err
+	}
+
+	return w.Write(buf[:])
+}
+
 func (hdr *messageHeadersData) CalculateChecksum(payload []byte) error {
 	checksumer := crc32Pool.Get().(hash.Hash32)
 	err := func() (err error) {
 		hdr.Checksum = 0
-		err = binary.Write(checksumer, binaryOrderType, hdr)
+		_, err = hdr.WriteTo(checksumer)
 		if err != nil {
 			return errors.Wrap(err)
 		}

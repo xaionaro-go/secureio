@@ -1,5 +1,9 @@
 package secureio
 
+import (
+	"sync"
+)
+
 type Buffer struct {
 	Bytes  []byte
 	Offset int
@@ -31,4 +35,23 @@ func (buf *Buffer) Len() int {
 
 func (buf *Buffer) Cap() int {
 	return cap(buf.Bytes)
+}
+
+var (
+	bufferPool = sync.Pool{
+		New: func() interface{} {
+			return &Buffer{}
+		},
+	}
+)
+
+func acquireBuffer() *Buffer {
+	buf := bufferPool.Get().(*Buffer)
+	buf.Grow(maxPacketSize)
+	return buf
+}
+
+func (buf *Buffer) Release() {
+	buf.Reset()
+	bufferPool.Put(buf)
 }

@@ -1,15 +1,19 @@
 package secureio
 
 type EventHandler interface {
+	OnInit(*Session)
 	OnConnect(*Session)
 	Error(*Session, error)
 	Infof(string, ...interface{})
 	Debugf(string, ...interface{})
+	IsDebugEnabled() bool
 }
 
 type dummyEventHandler struct{}
 
+func (h *dummyEventHandler) OnInit(*Session)               {}
 func (h *dummyEventHandler) OnConnect(*Session)            {}
+func (h *dummyEventHandler) IsDebugEnabled() bool          { return false }
 func (h *dummyEventHandler) Error(*Session, error)         {}
 func (h *dummyEventHandler) Infof(string, ...interface{})  {}
 func (h *dummyEventHandler) Debugf(string, ...interface{}) {}

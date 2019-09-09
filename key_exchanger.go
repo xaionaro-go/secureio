@@ -148,7 +148,9 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 			return
 		}
 		if err = kx.remoteIdentity.VerifySignature(msg.Signature[:], msg.PublicKey[:]); err != nil {
-			kx.messenger.sess.eventHandler.Debugf("wrong signature: %v", err)
+			if kx.messenger.sess.eventHandler.IsDebugEnabled() {
+				kx.messenger.sess.eventHandler.Debugf("wrong signature: %v", err)
+			}
 			return
 		}
 		nextLocal := kx.nextLocalPrivateKey
@@ -183,7 +185,9 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 
 func (kx *keyExchanger) Close() error {
 	kx.stop()
-	kx.messenger.sess.eventHandler.Debugf("key exchanger closed")
+	if kx.messenger.sess.eventHandler.IsDebugEnabled() {
+		kx.messenger.sess.eventHandler.Debugf("key exchanger closed")
+	}
 	return nil
 }
 

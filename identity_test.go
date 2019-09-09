@@ -31,7 +31,7 @@ func TestIdentityMutualConfirmationOfIdentityWithPSK(t *testing.T) {
 			ctx,
 			identity1,
 			conn0,
-			&testLogger{"0", t, true},
+			&testLogger{"0", t, true, nil},
 			opts,
 		)
 	}()
@@ -45,7 +45,7 @@ func TestIdentityMutualConfirmationOfIdentityWithPSK(t *testing.T) {
 			ctx,
 			identity0,
 			conn1,
-			&testLogger{"1", t, true},
+			&testLogger{"1", t, true, nil},
 			opts,
 		)
 	}()
@@ -83,7 +83,7 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 			ctx,
 			identity1,
 			conn0,
-			&testLogger{"0", t, false},
+			&testLogger{"0", t, false, nil},
 			opts0,
 		)
 	}()
@@ -97,7 +97,7 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 			ctx,
 			identity0,
 			conn1,
-			&testLogger{"1", t, false},
+			&testLogger{"1", t, false, nil},
 			opts1,
 		)
 	}()

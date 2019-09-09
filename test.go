@@ -12,23 +12,33 @@ type testLogger struct {
 	string
 	*testing.T
 	enableInfo bool
+	Session    *Session
 }
 
 func (l *testLogger) Error(sess *Session, err error) {
+	l.T.Errorf("T:%v:SID:%v", l.T.Name(), sess.ID())
 	l.T.Error(err)
 	l.T.Errorf("STACK: %v", string(debug.Stack()))
 }
 func (l *testLogger) Infof(format string, args ...interface{}) {
 	if !l.enableInfo {
+		fmt.Printf("T:%v:SID:%v: ", l.T.Name(), l.Session.ID())
 		fmt.Printf(format+"\n", args...)
 		return
 	}
 	l.T.Errorf(l.string+" [I] "+format, args...)
 }
 func (l *testLogger) Debugf(format string, args ...interface{}) {
+	fmt.Printf("T:%v:SID:%v: ", l.T.Name(), l.Session.ID())
 	fmt.Printf(format+"\n", args...)
 }
 func (l *testLogger) OnConnect(sess *Session) {
+}
+func (l *testLogger) OnInit(sess *Session) {
+	l.Session = sess
+}
+func (l *testLogger) IsDebugEnabled() bool {
+	return true
 }
 
 type pipeReadWriter struct {
