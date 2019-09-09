@@ -7,7 +7,6 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 	e "errors"
-	"hash/crc32"
 	"io"
 	"runtime"
 	"sync"
@@ -16,10 +15,13 @@ import (
 )
 
 const (
+	DefaultErrorOnSequentialDecryptFailsCount = 3
+)
+
+const (
 	updateKeyEveryNBytes = 1000000
 	messageQueueLength   = 1024
 	cipherBlockSize      = aes.BlockSize
-	cannotDecryptLimit   = 5
 )
 
 var (
@@ -54,10 +56,15 @@ type Checksumer interface {
 }
 
 type ReadItem struct {
-	Data []byte
+	isBusy bool
+	Data   []byte
 }
 
 func (it *ReadItem) Release() {
+	if !it.isBusy {
+		panic(`should not happened`)
+	}
+	it.isBusy = false
 	it.Data = it.Data[:0]
 	readItemPool.Put(it)
 }
@@ -70,7 +77,8 @@ type Session struct {
 	state          SessionState
 	identity       *Identity
 	remoteIdentity *Identity
-	psk            []byte
+	options        SessionOptions
+
 	keyExchanger   *keyExchanger
 	backend        io.ReadWriteCloser
 	messenger      [MessageTypeMax]*Messenger
@@ -78,8 +86,13 @@ type Session struct {
 	currentSecret  []byte
 	cipher         cipher.Block
 	previousCipher cipher.Block
-	logger         Logger
+	eventHandler   EventHandler
 	writeDeferChan chan *writeItem
+}
+
+type SessionOptions struct {
+	ErrorOnSequentialDecryptFailsCount *uint
+	KeyExchangerOptions                KeyExchangerOptions
 }
 
 func (sess *Session) WaitForState(states ...SessionState) SessionState {
@@ -92,7 +105,7 @@ func (sess *Session) GetState() SessionState {
 
 func (sess *Session) setState(state SessionState, cancelOnStates ...SessionState) (oldState SessionState) {
 	oldState = sess.state.Set(state, cancelOnStates...)
-	sess.logger.Debugf("setState: %v %v %v", state, cancelOnStates, oldState)
+	sess.eventHandler.Debugf("setState: %v %v %v", state, cancelOnStates, oldState)
 	return
 }
 
@@ -112,22 +125,43 @@ var (
 	}
 )
 
+func acquireReadItem() *ReadItem {
+	item := readItemPool.Get().(*ReadItem)
+	if item.isBusy {
+		panic(`should not happened`)
+	}
+	item.isBusy = true
+	return item
+}
+
 func newSession(
 	ctx context.Context,
 	identity, remoteIdentity *Identity,
 	backend io.ReadWriteCloser,
-	logger Logger,
-	psk []byte,
+	eventHandler EventHandler,
+	opts *SessionOptions,
 ) *Session {
+	if eventHandler == nil {
+		eventHandler = &dummyEventHandler{}
+	}
 
 	sess := &Session{
 		identity:       identity,
 		remoteIdentity: remoteIdentity,
-		psk:            psk,
 		state:          SessionState_new,
 		backend:        backend,
-		logger:         logger,
+		eventHandler:   eventHandler,
 		writeDeferChan: make(chan *writeItem, 1024),
+	}
+	if opts != nil {
+		sess.options = *opts
+	}
+	if sess.options.ErrorOnSequentialDecryptFailsCount == nil {
+		sess.options.ErrorOnSequentialDecryptFailsCount =
+			&[]uint{DefaultErrorOnSequentialDecryptFailsCount}[0]
+	}
+	if *sess.options.ErrorOnSequentialDecryptFailsCount == 0 {
+		sess.options.ErrorOnSequentialDecryptFailsCount = nil
 	}
 
 	sess.ctx, sess.cancelFunc = context.WithCancel(ctx)
@@ -143,11 +177,33 @@ func newSession(
 func (sess *Session) init() error {
 	sess.startKeyExchange()
 	sess.startReader()
+	sess.startCloser()
 	return nil
 }
 
 func (sess *Session) startReader() {
 	go sess.readerLoop()
+}
+
+func (sess *Session) startCloser() {
+	go func() {
+		select {
+		case <-sess.ctx.Done():
+		}
+
+		for _, messenger := range sess.messenger {
+			if messenger == nil {
+				continue
+			}
+			_ = messenger.Close()
+		}
+		for _, ch := range sess.ReadChan {
+			close(ch)
+		}
+
+		sess.setState(SessionState_closed)
+		sess.eventHandler.Debugf("secureio session closed")
+	}()
 }
 
 func (sess *Session) isDone() bool {
@@ -160,33 +216,10 @@ func (sess *Session) isDone() bool {
 }
 
 func (sess *Session) readerLoop() {
-	cannotDecryptCount := 0
+	cannotDecryptCount := uint(0)
 	var inputBuffer = make([]byte, maxPacketSize)
 	var decryptedBuffer Buffer
 	decryptedBuffer.Grow(maxPacketSize)
-	go func() {
-		select {
-		case <-sess.ctx.Done():
-		}
-
-		err := errors.Wrap(sess.backend.Close())
-		if err != nil {
-			sess.logger.Error(sess, err)
-		}
-
-		sess.setState(SessionState_closed)
-
-		for _, messenger := range sess.messenger {
-			if messenger == nil {
-				continue
-			}
-			_ = messenger.Close()
-		}
-		for i := 0; i < MessageTypeMax; i++ {
-			close(sess.ReadChan[i])
-		}
-		sess.logger.Debugf("secureio session closed")
-	}()
 
 	for {
 		select {
@@ -194,12 +227,12 @@ func (sess *Session) readerLoop() {
 			return
 		default:
 		}
-		item := readItemPool.Get().(*ReadItem)
-		sess.logger.Debugf("n, err := sess.backend.Read(inputBuffer)")
+		item := acquireReadItem()
+		sess.eventHandler.Debugf("n, err := sess.backend.Read(inputBuffer)")
 		n, err := sess.backend.Read(inputBuffer)
-		sess.logger.Debugf("/n, err := sess.backend.Read(inputBuffer): %v %v", n, err)
+		sess.eventHandler.Debugf("/n, err := sess.backend.Read(inputBuffer): %v %v", n, err)
 		if err != nil {
-			sess.logger.Error(sess, errors.Wrap(err))
+			sess.eventHandler.Error(sess, errors.Wrap(err))
 			continue
 		}
 		if n == 0 {
@@ -207,25 +240,35 @@ func (sess *Session) readerLoop() {
 		}
 
 		hdr, payload, err := sess.decrypt(&decryptedBuffer, inputBuffer[:n])
-		sess.logger.Debugf("%v %v %v", hdr, payload, err)
+		sess.eventHandler.Debugf("sess.decrypt() result: %v %v %v; isMessengerSet:%v",
+			hdr, payload, err,
+			hdr != nil && hdr.Type > 0 &&
+				hdr.Type < MessageTypeMax &&
+				sess.messenger[hdr.Type] != nil,
+		)
 		if err != nil && (err != ErrUnencrypted || hdr.Type != MessageType_keyExchange) {
 			err = errors.Wrap(err)
-			sess.logger.Infof("cannot decrypt: %v", err)
+			sess.eventHandler.Infof("cannot decrypt: %v", err)
 			cannotDecryptCount++
-			if cannotDecryptCount > cannotDecryptLimit {
-				sess.logger.Error(sess, err)
+			if sess.options.ErrorOnSequentialDecryptFailsCount != nil {
+				if cannotDecryptCount >= *sess.options.ErrorOnSequentialDecryptFailsCount {
+					sess.eventHandler.Error(sess, err)
+				}
 			}
 			continue
 		}
+		cannotDecryptCount = 0
 
-		item.Data = item.Data[0:hdr.Length]
-		copy(item.Data, payload)
 		if sess.messenger[hdr.Type] != nil {
+			item.Release()
 			if err := sess.messenger[hdr.Type].Handle(payload); err != nil {
-				sess.logger.Error(sess, errors.Wrap(err))
+				sess.eventHandler.Error(sess, errors.Wrap(err))
+				hdr.Release()
 				continue
 			}
 		} else {
+			item.Data = item.Data[0:hdr.Length]
+			copy(item.Data, payload)
 			sess.ReadChan[hdr.Type] <- item
 		}
 		hdr.Release()
@@ -239,7 +282,7 @@ func cipherDo(convertFunc func(dst, src []byte), dst, src []byte) {
 }
 
 func (sess *Session) decrypt(decrypted *Buffer, encrypted []byte) (*messageHeaders, []byte, error) {
-	hdr := newMessageHeaders()
+	hdr := acquireMessageHeaders()
 
 	decrypted.Reset()
 	decrypted.Grow(len(encrypted))
@@ -249,16 +292,17 @@ func (sess *Session) decrypt(decrypted *Buffer, encrypted []byte) (*messageHeade
 		cipherDo(sess.cipher.Decrypt, decrypted.Bytes, encrypted)
 	}
 
-	sess.logger.Debugf("decrypting: %v %v %v", decrypted.Bytes, encrypted, decrypted.Len())
+	sess.eventHandler.Debugf("decrypting: %v %v %v", decrypted.Bytes, encrypted, decrypted.Len())
 
-	err := binary.Read(decrypted, binaryOrderType, hdr)
-	sess.logger.Debugf("decrypted headers: %v %v %v %v %v", err, hdr, decrypted.Len(), decrypted.Cap(), decrypted.Offset)
+	err := binary.Read(decrypted, binaryOrderType, &hdr.messageHeadersData)
+	sess.eventHandler.Debugf("decrypted headers: %v %v %v %v %v", err, hdr, decrypted.Len(), decrypted.Cap(), decrypted.Offset)
 	if err != nil {
 		hdr.Release()
 		return nil, nil, errors.Wrap(err)
 	}
 
 	if len(decrypted.Bytes) < decrypted.Offset {
+		hdr.Release()
 		return nil, nil, errors.Wrap(ErrEmptyInput, len(decrypted.Bytes), decrypted.Offset)
 	}
 
@@ -274,7 +318,7 @@ func (sess *Session) decrypt(decrypted *Buffer, encrypted []byte) (*messageHeade
 
 		cipherDo(sess.previousCipher.Decrypt, decrypted.Bytes, encrypted)
 
-		if err2 = binary.Read(decrypted, binaryOrderType, hdr); err2 != nil {
+		if err2 = binary.Read(decrypted, binaryOrderType, &hdr.messageHeadersData); err2 != nil {
 			hdr.Release()
 			return nil, nil, errors.Wrap(err, err2)
 		}
@@ -288,7 +332,7 @@ func (sess *Session) decrypt(decrypted *Buffer, encrypted []byte) (*messageHeade
 	decrypted.Grow(len(encrypted))
 	copy(decrypted.Bytes, encrypted)
 
-	err3 := binary.Read(decrypted, binaryOrderType, hdr)
+	err3 := binary.Read(decrypted, binaryOrderType, &hdr.messageHeadersData)
 	if err3 != nil {
 		hdr.Release()
 		return nil, nil, errors.Wrap(err, err2, err3)
@@ -304,26 +348,22 @@ func (sess *Session) decrypt(decrypted *Buffer, encrypted []byte) (*messageHeade
 }
 
 func (sess *Session) checkChecksum(hdr *messageHeaders, decrypted *Buffer) error {
-	checksum := hdr.Checksum
-	hdr.Checksum = 0
-
-	checksumer := crc32.NewIEEE()
-	err := binary.Write(checksumer, binaryOrderType, hdr)
-	if err != nil {
-		return errors.Wrap(err, hdr)
-	}
-
 	if int(decrypted.Offset)+int(hdr.Length) > len(decrypted.Bytes) {
 		return errors.Wrap(ErrInvalidLength, hdr, decrypted.Offset, hdr.Length, len(decrypted.Bytes))
 	}
+	payload := decrypted.Bytes[decrypted.Offset : int(decrypted.Offset)+int(hdr.Length)]
 
-	_, err = checksumer.Write(decrypted.Bytes[decrypted.Offset : int(decrypted.Offset)+int(hdr.Length)])
+	checksum := hdr.Checksum
+	err := hdr.CalculateChecksum(payload)
+	calculcatedChecksum := hdr.Checksum
+	hdr.Checksum = checksum
+
 	if err != nil {
-		return errors.Wrap(err, hdr, decrypted.Offset, hdr.Length, len(decrypted.Bytes))
+		return errors.Wrap(err)
 	}
 
-	if checksumer.Sum32() != checksum {
-		return errors.Wrap(ErrInvalidChecksum, checksumer.Sum32(), checksum, hdr, decrypted.Offset, hdr.Length, len(decrypted.Bytes))
+	if calculcatedChecksum != checksum {
+		return errors.Wrap(ErrInvalidChecksum, calculcatedChecksum, checksum, hdr, decrypted.Offset, hdr.Length, len(decrypted.Bytes))
 	}
 
 	return nil
@@ -353,6 +393,9 @@ func (sess *Session) LockDo(fn func()) {
 }
 
 func (sess *Session) NewMessenger(msgType MessageType) *Messenger {
+	if sess.isDone() {
+		return nil
+	}
 	messenger := newMessenger(msgType, sess)
 	sess.setMessenger(msgType, messenger)
 	return messenger
@@ -386,13 +429,13 @@ func (it *writeItem) Reset() {
 }
 
 func (sess *Session) sendDeferred() {
-	sess.logger.Debugf("sendDeferred")
+	sess.eventHandler.Debugf("sendDeferred, %v", len(sess.writeDeferChan))
 	for {
 		select {
 		case item := <-sess.writeDeferChan:
 			_, err := sess.WriteMessage(item.MsgType, item.Payload)
 			if err != nil {
-				sess.logger.Error(sess, err)
+				sess.eventHandler.Error(sess, err)
 			}
 		default:
 			return
@@ -423,35 +466,36 @@ func (sess *Session) WriteMessage(msgType MessageType, payload []byte) (int, err
 		}
 	}
 
-	msg := newMessageHeaders()
-	defer msg.Release()
+	hdr := acquireMessageHeaders()
+	n, err := func() (int, error) {
+		hdr.Type = msgType
+		hdr.Length = uint16(len(payload))
+		err := hdr.CalculateChecksum(payload)
+		if err != nil {
+			return -1, err
+		}
 
-	msg.Type = msgType
-	msg.Length = uint16(len(payload))
-	msg.Checksum = 0
+		buf := acquireBytesBuffer()
+		n, err := sess.writeMessageUsingBuffer(hdr, payload, buf)
+		buf.Release()
+		return n, err
+	}()
+	hdr.Release()
 
-	checksumer := crc32.NewIEEE()
-	err := binary.Write(checksumer, binaryOrderType, msg)
+	return n, err
+}
+
+func (sess *Session) writeMessageUsingBuffer(
+	hdr *messageHeaders,
+	payload []byte,
+	buf *bytesBuffer,
+) (n int, err error) {
+
+	err = binary.Write(buf, binaryOrderType, &hdr.messageHeadersData)
 	if err != nil {
 		return -1, errors.Wrap(err)
 	}
-	n, err := checksumer.Write(payload)
-	if n != len(payload) && err == nil {
-		err = ErrPartialWrite
-	}
-	if err != nil {
-		return n, errors.Wrap(err)
-	}
-
-	msg.Checksum = checksumer.Sum32()
-
-	plain := newBytesBuffer()
-
-	err = binary.Write(plain, binaryOrderType, msg)
-	if err != nil {
-		return -1, errors.Wrap(err)
-	}
-	n, err = plain.Write(payload)
+	n, err = buf.Write(payload)
 	if n != len(payload) && err == nil {
 		err = errors.Wrap(ErrTooBig)
 	}
@@ -464,22 +508,22 @@ func (sess *Session) WriteMessage(msgType MessageType, payload []byte) (int, err
 		return 0, errors.Wrap(ErrAlreadyClosed)
 	}
 
-	sess.logger.Debugf("sess.cipher == nil: %v", sess.cipher == nil)
-	if sess.cipher == nil || msg.Type == MessageType_keyExchange {
-		n, err = sess.backend.Write(plain.Bytes())
+	sess.eventHandler.Debugf("sess.cipher == nil: %v", sess.cipher == nil)
+	if sess.cipher == nil || hdr.Type == MessageType_keyExchange {
+		n, err = sess.backend.Write(buf.Bytes())
 	} else {
-		encrypted := newBytesBuffer()
-		size := roundSize(plain.Len(), cipherBlockSize)
-		plain.Grow(size)
-		plainBytes := plain.Bytes()[:size]
+		encrypted := acquireBytesBuffer()
+		size := roundSize(buf.Len(), cipherBlockSize)
+		buf.Grow(size)
+		plainBytes := buf.Bytes()[:size]
 
 		encryptedBytes := encrypted.Bytes()[:size]
 		cipherDo(sess.cipher.Encrypt, encryptedBytes, plainBytes)
-		sess.logger.Debugf("encrypted == %v; plain == %v", encryptedBytes, plainBytes)
+		sess.eventHandler.Debugf("encrypted == %v; plain == %v", encryptedBytes, plainBytes)
 		n, err = sess.backend.Write(encryptedBytes)
 		encrypted.Release()
 	}
-	plain.Release()
+
 	return n, errors.Wrap(err)
 }
 
@@ -493,21 +537,21 @@ func (sess *Session) startKeyExchange() {
 		sess.ctx,
 		sess.identity,
 		sess.remoteIdentity,
-		sess.psk,
 		sess.NewMessenger(MessageType_keyExchange), func(secret []byte) {
 			// ok
-			sess.logger.Debugf("got key: %v", secret)
+			sess.eventHandler.Debugf("got key: %v", secret)
 			sess.setSecret(secret)
 			sess.setState(SessionState_established, SessionState_keyExchanging)
 
-			sess.logger.OnConnect(sess)
+			sess.eventHandler.OnConnect(sess)
 
 			sess.sendDeferred()
 		}, func(err error) {
 			// got error
 			_ = sess.Close()
-			sess.logger.Error(sess, errors.Wrap(err))
+			sess.eventHandler.Error(sess, errors.Wrap(err))
 		},
+		&sess.options.KeyExchangerOptions,
 	)
 }
 
@@ -516,7 +560,7 @@ func (sess *Session) setMessenger(msgType MessageType, messenger *Messenger) {
 		if sess.messenger[msgType] != nil {
 			err := errors.Wrap(sess.messenger[msgType].Close())
 			if err != nil {
-				sess.logger.Error(sess, err)
+				sess.eventHandler.Error(sess, err)
 			}
 		}
 		sess.messenger[msgType] = messenger
@@ -527,13 +571,10 @@ func (sess *Session) setSecret(newSecret []byte) {
 	sess.LockDo(func() {
 		sess.previousCipher = sess.cipher
 		var err error
-		key := make([]byte, cipherBlockSize)
-		for i := 0; i < len(newSecret); i++ {
-			key[i%cipherBlockSize] ^= newSecret[i]
-		}
+		key := newSecret[:cipherBlockSize]
 		sess.currentSecret = key
 		sess.cipher, err = aes.NewCipher(key)
-		sess.logger.Debugf("new cipher with key: %v", key)
+		sess.eventHandler.Debugf("new cipher with key: %v", key)
 		if err != nil {
 			panic(err)
 		}
@@ -570,7 +611,7 @@ var (
 	}
 )
 
-func newBytesBuffer() *bytesBuffer {
+func acquireBytesBuffer() *bytesBuffer {
 	buf := bytesBufferPool.Get().(*bytesBuffer)
 	buf.Grow(maxPacketSize)
 	return buf

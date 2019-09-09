@@ -1,6 +1,7 @@
 package secureio
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"runtime/debug"
@@ -17,13 +18,15 @@ func (l *testLogger) Error(sess *Session, err error) {
 	l.T.Error(err)
 	l.T.Errorf("STACK: %v", string(debug.Stack()))
 }
-func (l *testLogger) Infof(fmt string, args ...interface{}) {
+func (l *testLogger) Infof(format string, args ...interface{}) {
 	if !l.enableInfo {
+		fmt.Printf(format+"\n", args...)
 		return
 	}
-	l.T.Errorf(l.string+" [I] "+fmt, args...)
+	l.T.Errorf(l.string+" [I] "+format, args...)
 }
-func (l *testLogger) Debugf(fmt string, args ...interface{}) {
+func (l *testLogger) Debugf(format string, args ...interface{}) {
+	fmt.Printf(format+"\n", args...)
 }
 func (l *testLogger) OnConnect(sess *Session) {
 }

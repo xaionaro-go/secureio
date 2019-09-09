@@ -11,8 +11,14 @@ import (
 
 	"github.com/wsddn/go-ecdh"
 	"golang.org/x/crypto/ed25519"
+	"golang.org/x/crypto/sha3"
 
 	"github.com/xaionaro-go/errors"
+)
+
+const (
+	DefaultKeyExchangeInterval = time.Minute
+	DefaultKeyExchangeTimeout  = time.Minute
 )
 
 const (
@@ -23,6 +29,10 @@ const (
 
 var (
 	binaryOrderType = binary.LittleEndian
+
+	// Salt is used to append PSKs. If you change this value then
+	// it is required to change it on both sides.
+	Salt = []byte(`xaionaro-go/secureio.KeyExchanger`)
 )
 
 var (
@@ -31,12 +41,15 @@ var (
 )
 
 type keyExchanger struct {
-	locker                     sync.Mutex
-	ctx                        context.Context
-	cancelFunc                 func()
-	okFunc                     func([]byte)
-	errFunc                    func(error)
-	psk                        []byte
+	locker sync.Mutex
+
+	ctx        context.Context
+	cancelFunc func()
+	okFunc     func([]byte)
+	errFunc    func(error)
+	options    KeyExchangerOptions
+
+	failCount                  uint
 	lastExchangeTS             time.Time
 	nextLocalPrivateKey        *[PrivateKeySize]byte
 	nextLocalPublicKey         *[PublicKeySize]byte
@@ -48,23 +61,39 @@ type keyExchanger struct {
 	ecdh                       ecdh.ECDH
 }
 
+type KeyExchangerOptions struct {
+	Interval time.Duration
+	Timeout  time.Duration
+	PSK      []byte
+}
+
 func newKeyExchanger(
 	ctx context.Context,
 	localIdentity *Identity,
 	remoteIdentity *Identity,
-	psk []byte,
 	messenger *Messenger,
 	okFunc func([]byte), errFunc func(error),
+	opts *KeyExchangerOptions,
 ) *keyExchanger {
 	kx := &keyExchanger{
 		okFunc:         okFunc,
 		errFunc:        errFunc,
 		localIdentity:  localIdentity,
 		remoteIdentity: remoteIdentity,
-		psk:            psk,
 		messenger:      messenger,
 		ecdh:           ecdh.NewCurve25519ECDH(),
 	}
+
+	if opts != nil {
+		kx.options = *opts
+	}
+	if kx.options.Interval == 0 {
+		kx.options.Interval = DefaultKeyExchangeInterval
+	}
+	if kx.options.Timeout == 0 {
+		kx.options.Timeout = DefaultKeyExchangeTimeout
+	}
+
 	kx.ctx, kx.cancelFunc = context.WithCancel(ctx)
 	messenger.SetHandler(kx)
 	kx.start()
@@ -77,19 +106,23 @@ func (kx *keyExchanger) LockDo(fn func()) {
 	fn()
 }
 
-func (kx *keyExchanger) generateSharedKey(localPrivateKey *[PrivateKeySize]byte, remotePublicKey *[PublicKeySize]byte) ([]byte, error) {
+func (kx *keyExchanger) generateSharedKey(
+	localPrivateKey *[PrivateKeySize]byte,
+	remotePublicKey *[PublicKeySize]byte,
+) ([]byte, error) {
 	key, err := kx.ecdh.GenerateSharedSecret(localPrivateKey, remotePublicKey)
 	if err != nil {
 		return nil, err
 	}
 
-	for start := 0; start < len(kx.psk); start += len(key) {
-		end := start + len(key)
-		if end > len(kx.psk) {
-			end = len(kx.psk)
-		}
-		for i := start; i < end; i++ {
-			key[i-start] ^= kx.psk[i]
+	psk := kx.options.PSK
+	if len(psk) > 0 {
+		pskWithSalt := make([]byte, 0, len(psk)+len(Salt))
+		pskWithSalt = append(pskWithSalt, psk...)
+		pskWithSalt = append(pskWithSalt, Salt...)
+		pskHash := sha3.Sum256(pskWithSalt)
+		for i := 0; i < len(pskHash); i++ {
+			key[i] ^= pskHash[i]
 		}
 	}
 
@@ -106,6 +139,8 @@ func (kx *keyExchanger) isDone() bool {
 }
 
 func (kx *keyExchanger) Handle(b []byte) (err error) {
+	defer func() { err = errors.Wrap(err) }()
+
 	kx.LockDo(func() {
 		msg := &kx.remoteKeySeedUpdateMessage
 		err = binary.Read(bytes.NewBuffer(b), binaryOrderType, msg)
@@ -113,7 +148,7 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 			return
 		}
 		if err = kx.remoteIdentity.VerifySignature(msg.Signature[:], msg.PublicKey[:]); err != nil {
-			kx.messenger.sess.logger.Debugf("wrong signature: %v", err)
+			kx.messenger.sess.eventHandler.Debugf("wrong signature: %v", err)
 			return
 		}
 		nextLocal := kx.nextLocalPrivateKey
@@ -124,7 +159,7 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 		nextKey, genErr := kx.generateSharedKey(nextLocal, nextRemote)
 		if genErr != nil {
 			_ = kx.Close()
-			if genErr.(errors.SmartError).OriginalError() != ErrAlreadyClosed || !kx.isDone() {
+			if genErr.(*errors.Error).Err != ErrAlreadyClosed || !kx.isDone() {
 				kx.errFunc(errors.Wrap(genErr))
 			}
 			return
@@ -136,7 +171,7 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 			err := kx.sendPublicKey()
 			if err != nil {
 				_ = kx.Close()
-				if err.(errors.SmartError).OriginalError() != ErrAlreadyClosed || !kx.isDone() {
+				if err.(*errors.Error).Err != ErrAlreadyClosed || !kx.isDone() {
 					kx.errFunc(errors.Wrap(err))
 				}
 				return
@@ -148,7 +183,7 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 
 func (kx *keyExchanger) Close() error {
 	kx.stop()
-	kx.messenger.sess.logger.Debugf("key exchanger closed")
+	kx.messenger.sess.eventHandler.Debugf("key exchanger closed")
 	return nil
 }
 
@@ -166,10 +201,11 @@ func (kx *keyExchanger) iterate() {
 		lastExchangeTS = kx.lastExchangeTS
 	})
 	now := time.Now()
-	if now.Sub(lastExchangeTS) < time.Minute {
+	if now.Sub(lastExchangeTS) < kx.options.Interval {
 		return
 	}
-	if !lastExchangeTS.IsZero() && now.Sub(lastExchangeTS) > 2*time.Minute {
+	if !lastExchangeTS.IsZero() && now.Sub(lastExchangeTS) >
+		kx.options.Interval+kx.options.Timeout {
 		_ = kx.Close()
 		kx.errFunc(errors.Wrap(ErrKeyExchangeTimeout))
 		return
@@ -186,6 +222,7 @@ func (kx *keyExchanger) loop() {
 	kx.UpdateKey()
 	kx.iterate()
 	sendPublicKeyTicker := time.NewTicker(time.Second)
+	defer sendPublicKeyTicker.Stop()
 	for {
 		select {
 		case <-kx.ctx.Done():

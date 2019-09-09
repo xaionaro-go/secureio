@@ -2,6 +2,7 @@ package secureio
 
 import (
 	"errors"
+	"sync/atomic"
 )
 
 var (
@@ -16,7 +17,7 @@ type Messenger struct {
 	messageType MessageType
 	sess        *Session
 	handler     Handler
-	isClosed    bool
+	isClosed    uint32
 }
 
 func newMessenger(msgType MessageType, sess *Session) *Messenger {
@@ -35,11 +36,10 @@ func (w *Messenger) Handle(b []byte) error {
 }
 
 func (w *Messenger) Close() error {
-	if w.isClosed {
+	if atomic.SwapUint32(&w.isClosed, 1) != 0 {
 		return nil
 	}
 	var err error
-	w.isClosed = true
 	if closer, ok := w.handler.(interface{ Close() error }); ok {
 		err = closer.Close()
 	}

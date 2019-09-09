@@ -13,6 +13,8 @@ import (
 
 	"github.com/pkg/errors"
 	"golang.org/x/crypto/ed25519"
+
+	xerrors "github.com/xaionaro-go/errors"
 )
 
 const (
@@ -24,13 +26,6 @@ const (
 var (
 	ErrInvalidSignature = errors.New("invalid signature")
 )
-
-type Logger interface {
-	OnConnect(*Session)
-	Error(*Session, error)
-	Infof(string, ...interface{})
-	Debugf(string, ...interface{})
-}
 
 type Keys struct {
 	Public  ed25519.PublicKey
@@ -176,40 +171,41 @@ func (i *Identity) NewSession(
 	ctx context.Context,
 	remoteIdentity *Identity,
 	backend io.ReadWriteCloser,
-	logger Logger,
+	eventHandler EventHandler,
+	opts *SessionOptions,
 ) *Session {
-	return i.NewSessionWithPSK(ctx, remoteIdentity, backend, logger, nil)
-}
-
-func (i *Identity) NewSessionWithPSK(
-	ctx context.Context,
-	remoteIdentity *Identity,
-	backend io.ReadWriteCloser,
-	logger Logger,
-	psk []byte,
-) *Session {
-	return newSession(ctx, i, remoteIdentity, backend, logger, psk)
+	return newSession(ctx, i, remoteIdentity, backend, eventHandler, opts)
 }
 
 func (i *Identity) MutualConfirmationOfIdentity(
 	ctx context.Context,
 	remoteIdentity *Identity,
 	backend io.ReadWriteCloser,
-	logger Logger,
-) (err error, ephemeralKey []byte) {
-	return i.MutualConfirmationOfIdentityWithPSK(ctx, remoteIdentity, backend, logger, nil)
-}
-
-func (i *Identity) MutualConfirmationOfIdentityWithPSK(
-	ctx context.Context,
-	remoteIdentity *Identity,
-	backend io.ReadWriteCloser,
-	logger Logger,
-	psk []byte,
+	eventHandler EventHandler,
+	options *SessionOptions,
 ) (err error, ephemeralKey []byte) {
 	var n int
 
-	sess := newSession(ctx, i, remoteIdentity, backend, logger, psk)
+	var opts SessionOptions
+	if options != nil {
+		opts = *options
+	}
+	opts.ErrorOnSequentialDecryptFailsCount = &[]uint{1}[0]
+
+	sess := newSession(
+		ctx,
+		i,
+		remoteIdentity,
+		backend,
+		wrapErrorHandler(eventHandler, func(sess *Session, err error) {
+			if !err.(*xerrors.Error).Has(ErrCannotDecrypt) {
+				eventHandler.Error(sess, err)
+				return
+			}
+			sess.Close()
+		}),
+		&opts,
+	)
 
 	n, err = sess.Write(i.Keys.Public)
 	if err != nil {

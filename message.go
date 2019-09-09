@@ -1,12 +1,15 @@
 package secureio
 
 import (
+	"encoding/binary"
+	"hash"
+	"hash/crc32"
 	"sync"
-	"unsafe"
+
+	"github.com/xaionaro-go/errors"
 )
 
 const (
-	maxParallel    = 128
 	maxPayloadSize = 1024
 )
 
@@ -27,24 +30,36 @@ const (
 	MessageTypeMax
 )
 
-type messageHeaders struct {
+type messageHeadersData struct {
 	Type     MessageType
 	Length   uint16
 	Checksum uint32
 }
 
-var messageHeadersSize = unsafe.Sizeof(messageHeaders{})
+type messageHeaders struct {
+	messageHeadersData
 
-func (msg *messageHeaders) Reset() {
+	isBusy bool
+}
+
+var messageHeadersSize = binary.Size(messageHeaders{})
+
+func (msg *messageHeadersData) Reset() {
 	msg.Type = MessageType_undefined
 	msg.Length = 0
 	msg.Checksum = 0
 }
 
-type message struct {
-	messageHeaders
+type messageData struct {
+	messageHeadersData
 
 	Payload [maxPayloadSize]byte
+}
+
+type message struct {
+	messageData
+
+	isBusy bool
 }
 
 var (
@@ -60,20 +75,72 @@ var (
 	}
 )
 
-func newMessage() *message {
-	return messagePool.Get().(*message)
+func acquireMessage() *message {
+	msg := messagePool.Get().(*message)
+	if msg.isBusy {
+		panic(`should not happened`)
+	}
+	msg.isBusy = true
+	return msg
 }
 
-func newMessageHeaders() *messageHeaders {
-	return messageHeadersPool.Get().(*messageHeaders)
+func acquireMessageHeaders() *messageHeaders {
+	hdr := messageHeadersPool.Get().(*messageHeaders)
+	if hdr.isBusy {
+		panic(`should not happened`)
+	}
+	hdr.isBusy = true
+	return hdr
 }
 
-func (msg *messageHeaders) Release() {
-	msg.Reset()
-	messageHeadersPool.Put(msg)
+func (hdr *messageHeaders) Release() {
+	if hdr == nil || !hdr.isBusy {
+		panic(`should not happened`)
+	}
+	hdr.Reset()
+	hdr.isBusy = false
+	messageHeadersPool.Put(hdr)
+}
+
+var (
+	crc32Pool = sync.Pool{
+		New: func() interface{} {
+			return crc32.NewIEEE()
+		},
+	}
+)
+
+func (hdr *messageHeadersData) CalculateChecksum(payload []byte) error {
+	checksumer := crc32Pool.Get().(hash.Hash32)
+	err := func() (err error) {
+		hdr.Checksum = 0
+		err = binary.Write(checksumer, binaryOrderType, hdr)
+		if err != nil {
+			return errors.Wrap(err)
+		}
+
+		n, err := checksumer.Write(payload)
+		if n != len(payload) && err == nil {
+			err = errors.Wrap(ErrPartialWrite, n, len(payload))
+		}
+		if err != nil {
+			return errors.Wrap(err)
+		}
+
+		hdr.Checksum = checksumer.Sum32()
+		return
+	}()
+	checksumer.Reset()
+	crc32Pool.Put(checksumer)
+
+	return err
 }
 
 func (msg *message) Release() {
+	if msg == nil || !msg.isBusy {
+		panic(`should not happened`)
+	}
 	msg.Reset()
+	msg.isBusy = false
 	messagePool.Put(msg)
 }

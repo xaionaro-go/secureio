@@ -84,8 +84,8 @@ func main() {
 
 	ctx := context.Background()
 
-	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{"0"})
-	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{"1"})
+	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{"0"}, nil)
+	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{"1"}, nil)
 
 	fmt.Println("write")
 
