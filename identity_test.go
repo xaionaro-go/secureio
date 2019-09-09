@@ -18,7 +18,8 @@ func TestIdentityMutualConfirmationOfIdentityWithPSK(t *testing.T) {
 	opts.KeyExchangerOptions.PSK = make([]byte, 64)
 	rand.Read(opts.KeyExchangerOptions.PSK)
 
-	ctx, _ := context.WithDeadline(context.Background(), time.Now().Add(5*time.Second))
+	ctx, cancelFunc := context.WithDeadline(context.Background(), time.Now().Add(5*time.Second))
+	defer cancelFunc()
 
 	var wg sync.WaitGroup
 
@@ -31,7 +32,7 @@ func TestIdentityMutualConfirmationOfIdentityWithPSK(t *testing.T) {
 			ctx,
 			identity1,
 			conn0,
-			&testLogger{"0", t, true, nil},
+			&testLogger{"0", t, true, true, nil},
 			opts,
 		)
 	}()
@@ -45,7 +46,7 @@ func TestIdentityMutualConfirmationOfIdentityWithPSK(t *testing.T) {
 			ctx,
 			identity0,
 			conn1,
-			&testLogger{"1", t, true, nil},
+			&testLogger{"1", t, true, true, nil},
 			opts,
 		)
 	}()
@@ -83,7 +84,7 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 			ctx,
 			identity1,
 			conn0,
-			&testLogger{"0", t, false, nil},
+			&testLogger{"0", t, false, true, nil},
 			opts0,
 		)
 	}()
@@ -97,7 +98,7 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 			ctx,
 			identity0,
 			conn1,
-			&testLogger{"1", t, false, nil},
+			&testLogger{"1", t, false, true, nil},
 			opts1,
 		)
 	}()

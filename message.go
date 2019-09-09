@@ -34,6 +34,32 @@ const (
 	MessageTypeMax
 )
 
+func (t MessageType) String() string {
+	switch t {
+	case MessageType_undefined:
+		return `undefined`
+	case MessageType_keyExchange:
+		return `key_exchange`
+	case MessageType_dataPacketType0:
+		return `type0`
+	case MessageType_dataPacketType1:
+		return `type1`
+	case MessageType_dataPacketType2:
+		return `type2`
+	case MessageType_dataPacketType3:
+		return `type3`
+	case MessageType_dataPacketType4:
+		return `type4`
+	case MessageType_dataPacketType5:
+		return `type5`
+	case MessageType_dataPacketType6:
+		return `type6`
+	case MessageType_dataPacketType7:
+		return `type7`
+	}
+	return `unknown`
+}
+
 type messageHeadersData struct {
 	Type     MessageType
 	Length   uint16

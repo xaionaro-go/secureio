@@ -17,6 +17,24 @@ const (
 	sessionState_inTransition
 )
 
+func (state SessionState) String() string {
+	switch state {
+	case SessionState_new:
+		return `new`
+	case SessionState_closed:
+		return `closed`
+	case SessionState_keyExchanging:
+		return `key_exchanging`
+	case SessionState_established:
+		return `established`
+	case SessionState_closing:
+		return `closing`
+	case sessionState_inTransition:
+		return `in_transition`
+	}
+	return `unknown`
+}
+
 func randSleep() {
 	time.Sleep(time.Microsecond * time.Duration(mathRand.Intn(100)))
 }
@@ -31,6 +49,10 @@ func (state *SessionState) WaitFor(states ...SessionState) SessionState {
 		}
 		randSleep()
 	}
+}
+
+func (state *SessionState) Load() SessionState {
+	return SessionState(atomic.LoadUint64((*uint64)(state)))
 }
 
 func (state *SessionState) Get() (loadedState SessionState) {

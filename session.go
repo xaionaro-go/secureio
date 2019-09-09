@@ -79,6 +79,7 @@ type Session struct {
 	remoteIdentity *Identity
 	options        SessionOptions
 
+	messagesCount  uint64
 	keyExchanger   *keyExchanger
 	backend        io.ReadWriteCloser
 	messenger      [MessageTypeMax]*Messenger
@@ -88,9 +89,11 @@ type Session struct {
 	previousCipher cipher.Block
 	eventHandler   EventHandler
 	writeDeferChan chan *writeItem
+	stopWaitGroup  sync.WaitGroup
 }
 
 type SessionOptions struct {
+	DetachOnMessagesCount              uint64
 	ErrorOnSequentialDecryptFailsCount *uint
 	KeyExchangerOptions                KeyExchangerOptions
 }
@@ -187,35 +190,55 @@ func (sess *Session) init() error {
 	sess.eventHandler.OnInit(sess)
 	sess.startKeyExchange()
 	sess.startReader()
-	sess.startCloser()
+	sess.startBackendCloser()
 	return nil
 }
 
 func (sess *Session) startReader() {
-	go sess.readerLoop()
+	sess.stopWaitGroup.Add(1)
+	go func() {
+		defer sess.stopWaitGroup.Done()
+		sess.readerLoop()
+	}()
 }
 
-func (sess *Session) startCloser() {
+func (sess *Session) startBackendCloser() {
+	sess.stopWaitGroup.Add(1)
 	go func() {
+		defer sess.stopWaitGroup.Done()
 		select {
 		case <-sess.ctx.Done():
 		}
 
-		for _, messenger := range sess.messenger {
-			if messenger == nil {
-				continue
-			}
-			_ = messenger.Close()
-		}
-		for _, ch := range sess.ReadChan {
-			close(ch)
+		sess.setState(SessionState_closing, SessionState_closed)
+
+		msgCount := atomic.LoadUint64(&sess.messagesCount)
+		if sess.eventHandler.IsDebugEnabled() {
+			sess.eventHandler.Debugf("startBackendCloser() try: %v %v",
+				sess.options.DetachOnMessagesCount, msgCount)
 		}
 
-		sess.setState(SessionState_closed)
+		if sess.options.DetachOnMessagesCount != 0 &&
+			msgCount == sess.options.DetachOnMessagesCount {
+			return
+		}
+
+		sess.backend.Close()
 		if sess.eventHandler.IsDebugEnabled() {
-			sess.eventHandler.Debugf("secureio session closed")
+			sess.eventHandler.Debugf("sess.backend.Close()")
 		}
 	}()
+}
+
+func (sess *Session) isDoneFast() bool {
+	switch sess.state.Load() {
+	case SessionState_new, SessionState_keyExchanging,
+		SessionState_established:
+		return false
+	case sessionState_inTransition:
+		return sess.isDone()
+	}
+	return true
 }
 
 func (sess *Session) isDone() bool {
@@ -228,17 +251,38 @@ func (sess *Session) isDone() bool {
 }
 
 func (sess *Session) readerLoop() {
+	defer func() {
+		sess.cancelFunc()
+
+		for _, messenger := range sess.messenger {
+			if messenger == nil {
+				continue
+			}
+			_ = messenger.Close()
+		}
+		for idx, ch := range sess.ReadChan {
+			close(ch)
+			sess.ReadChan[idx] = nil
+		}
+
+		sess.setState(SessionState_closed)
+		if sess.eventHandler.IsDebugEnabled() {
+			sess.eventHandler.Debugf("secureio session closed")
+		}
+	}()
+
+	if sess.eventHandler.IsDebugEnabled() {
+		defer func() {
+			sess.eventHandler.Debugf("/readerLoop")
+		}()
+	}
+
 	cannotDecryptCount := uint(0)
 	var inputBuffer = make([]byte, maxPacketSize)
 	var decryptedBuffer Buffer
 	decryptedBuffer.Grow(maxPacketSize)
 
-	for {
-		select {
-		case <-sess.ctx.Done():
-			return
-		default:
-		}
+	for !sess.isDoneFast() {
 		item := acquireReadItem()
 
 		if sess.eventHandler.IsDebugEnabled() {
@@ -249,7 +293,10 @@ func (sess *Session) readerLoop() {
 			sess.eventHandler.Debugf("/n, err := sess.backend.Read(inputBuffer): %v %v", n, err)
 		}
 		if err != nil {
-			sess.eventHandler.Error(sess, errors.Wrap(err))
+			if sess.isDoneFast() {
+				return
+			}
+			sess.eventHandler.Error(sess, errors.Wrap(err, sess.state.Load()))
 			continue
 		}
 		if n == 0 {
@@ -282,13 +329,24 @@ func (sess *Session) readerLoop() {
 			item.Release()
 			if err := sess.messenger[hdr.Type].Handle(payload); err != nil {
 				sess.eventHandler.Error(sess, errors.Wrap(err))
-				hdr.Release()
-				continue
 			}
 		} else {
 			item.Data = item.Data[0:hdr.Length]
 			copy(item.Data, payload)
+			if sess.eventHandler.IsDebugEnabled() {
+				sess.eventHandler.Debugf(`sent the message %v to a messenger`, hdr)
+			}
 			sess.ReadChan[hdr.Type] <- item
+		}
+
+		if sess.options.DetachOnMessagesCount > 0 && hdr.Type != MessageType_keyExchange {
+			if atomic.AddUint64(&sess.messagesCount, 1) >= sess.options.DetachOnMessagesCount {
+				if sess.eventHandler.IsDebugEnabled() {
+					sess.eventHandler.Debugf(`reached limit "DetachOnMessagesCount". Last hdr == %v`, hdr)
+				}
+				hdr.Release()
+				return
+			}
 		}
 		hdr.Release()
 	}
@@ -576,7 +634,8 @@ func (sess *Session) startKeyExchange() {
 				sess.eventHandler.Debugf("got key: %v", secret)
 			}
 			sess.setSecret(secret)
-			sess.setState(SessionState_established, SessionState_keyExchanging)
+			sess.setState(SessionState_established,
+				SessionState_closed, SessionState_closing, SessionState_new, SessionState_established)
 
 			sess.eventHandler.OnConnect(sess)
 
@@ -619,9 +678,10 @@ func (sess *Session) setSecret(newSecret []byte) {
 }
 
 func (sess *Session) read(p []byte) (int, error) {
-	item := <-sess.ReadChan[MessageType_dataPacketType0]
+	ch := sess.ReadChan[MessageType_dataPacketType0]
+	item := <-ch
 	if item == nil {
-		return -1, errors.Wrap(ErrClosed)
+		return -1, errors.Wrap(ErrClosed, len(ch))
 	}
 	if len(p) < len(item.Data) {
 		return -1, errors.Wrap(ErrTooBig)
@@ -655,7 +715,16 @@ func (sess *Session) Close() error {
 	sess.cancelFunc()
 	return nil
 }
-
+func (sess *Session) CloseAndWait() error {
+	if err := sess.Close(); err != nil {
+		return err
+	}
+	sess.WaitForClosure()
+	return nil
+}
+func (sess *Session) WaitForClosure() {
+	sess.stopWaitGroup.Wait()
+}
 func (sess *Session) GetEphemeralKey() []byte {
 	return sess.currentSecret
 }

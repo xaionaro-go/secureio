@@ -191,6 +191,7 @@ func (i *Identity) MutualConfirmationOfIdentity(
 		opts = *options
 	}
 	opts.ErrorOnSequentialDecryptFailsCount = &[]uint{1}[0]
+	opts.DetachOnMessagesCount = 1
 
 	sess := newSession(
 		ctx,
@@ -198,9 +199,9 @@ func (i *Identity) MutualConfirmationOfIdentity(
 		remoteIdentity,
 		backend,
 		wrapErrorHandler(eventHandler, func(sess *Session, err error) {
-			if !err.(*xerrors.Error).Has(ErrCannotDecrypt) {
-				eventHandler.Error(sess, err)
-				return
+			xerr := err.(*xerrors.Error)
+			if !xerr.Has(ErrCannotDecrypt) {
+				err = xerr
 			}
 			sess.Close()
 		}),
@@ -232,6 +233,8 @@ func (i *Identity) MutualConfirmationOfIdentity(
 	}
 
 	ephemeralKey = sess.GetEphemeralKey()
+	sess.Close()
+	sess.WaitForClosure()
 	return
 }
 

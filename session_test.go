@@ -2,12 +2,13 @@ package secureio
 
 import (
 	"context"
+	"io"
 	"math/rand"
-	"net/http"
-	_ "net/http/pprof"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/xaionaro-go/errors"
 )
 
 func TestSession(t *testing.T) {
@@ -15,8 +16,8 @@ func TestSession(t *testing.T) {
 
 	identity0, identity1, conn0, conn1 := testPair(t)
 
-	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{"0", t, true, nil}, nil)
-	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{"1", t, true, nil}, nil)
+	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{"0", t, true, false, nil}, nil)
+	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{"1", t, true, false, nil}, nil)
 
 	writeBuf := make([]byte, 65536-messageHeadersSize)
 	rand.Read(writeBuf)
@@ -29,6 +30,12 @@ func TestSession(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.Equal(t, writeBuf, readBuf)
+
+	assert.NoError(t, sess0.Close())
+	assert.NoError(t, sess1.Close())
+
+	assert.True(t, sess0.isDone())
+	assert.True(t, sess1.isDone())
 }
 
 func BenchmarkSessionWriteRead1(b *testing.B) {
@@ -46,18 +53,20 @@ func BenchmarkSessionWriteRead65000(b *testing.B) {
 func benchmarkSessionWriteRead(b *testing.B, blockSize uint) {
 	ctx := context.Background()
 
-	go func() {
-		http.ListenAndServe("localhost:6060", nil)
-	}()
-
 	identity0, identity1, conn0, conn1 := testPair(nil)
 
 	eventHandler := wrapErrorHandler(&dummyEventHandler{}, func(sess *Session, err error) {
-		panic(err)
+		xerr := err.(*errors.Error)
+		if xerr.Has(io.EOF) {
+			return
+		}
+		panic(xerr)
 	})
 
 	sess0 := identity0.NewSession(ctx, identity1, conn0, eventHandler, nil)
 	sess1 := identity1.NewSession(ctx, identity0, conn1, eventHandler, nil)
+	defer sess0.Close()
+	defer sess1.Close()
 
 	writeBuf := make([]byte, blockSize)
 	rand.Read(writeBuf)

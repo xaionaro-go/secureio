@@ -3,21 +3,30 @@ package secureio
 import (
 	"fmt"
 	"io"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"runtime/debug"
 	"testing"
+
+	"github.com/xaionaro-go/errors"
 )
 
 type testLogger struct {
 	string
 	*testing.T
-	enableInfo bool
-	Session    *Session
+	enableInfo  bool
+	enableDebug bool
+	Session     *Session
 }
 
 func (l *testLogger) Error(sess *Session, err error) {
+	xerr := err.(*errors.Error)
+	if xerr.Has(io.EOF) {
+		return
+	}
 	l.T.Errorf("T:%v:SID:%v", l.T.Name(), sess.ID())
-	l.T.Error(err)
+	l.T.Error(xerr)
 	l.T.Errorf("STACK: %v", string(debug.Stack()))
 }
 func (l *testLogger) Infof(format string, args ...interface{}) {
@@ -38,32 +47,38 @@ func (l *testLogger) OnInit(sess *Session) {
 	l.Session = sess
 }
 func (l *testLogger) IsDebugEnabled() bool {
-	return true
+	return l.enableDebug
 }
 
 type pipeReadWriter struct {
 	Prefix string
-	io.Reader
-	io.Writer
+	io.ReadCloser
+	io.WriteCloser
 }
 
 func (p *pipeReadWriter) Close() error {
+	p.ReadCloser.Close()
+	p.WriteCloser.Close()
 	return nil
 }
 
 func (p *pipeReadWriter) Read(b []byte) (int, error) {
-	n, err := p.Reader.Read(b)
+	n, err := p.ReadCloser.Read(b)
 	return n, err
 }
 
 func (p *pipeReadWriter) Write(b []byte) (int, error) {
-	n, err := p.Writer.Write(b)
+	n, err := p.WriteCloser.Write(b)
 
 	return n, err
 }
 
 func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 *pipeReadWriter) {
 	var err error
+
+	go func() {
+		http.ListenAndServe("localhost:6060", nil)
+	}()
 
 	dir := `/tmp/.test_xaionaro-go_secureio_session_`
 	_ = os.Mkdir(dir+"0", 0700)
@@ -88,15 +103,15 @@ func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 *pipeR
 	}
 
 	conn0 = &pipeReadWriter{
-		Prefix: "0",
-		Reader: pipeR0,
-		Writer: pipeW1,
+		Prefix:      "0",
+		ReadCloser:  pipeR0,
+		WriteCloser: pipeW1,
 	}
 
 	conn1 = &pipeReadWriter{
-		Prefix: "1",
-		Reader: pipeR1,
-		Writer: pipeW0,
+		Prefix:      "1",
+		ReadCloser:  pipeR1,
+		WriteCloser: pipeW0,
 	}
 
 	return
