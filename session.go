@@ -5,7 +5,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	e "errors"
-	"fmt"
 	"io"
 	"runtime"
 	"sync"
@@ -430,7 +429,6 @@ func (sess *Session) decrypt(decrypted *Buffer, encrypted []byte) (*messageHeade
 
 func (sess *Session) checkChecksum(hdr *messageHeaders, decrypted *Buffer) error {
 	if int(decrypted.Offset)+int(hdr.Length) > len(decrypted.Bytes) {
-		fmt.Println(sess.ID(), ErrInvalidLength, hdr, decrypted.Offset, hdr.Length, len(decrypted.Bytes))
 		return errors.Wrap(ErrInvalidLength, hdr, decrypted.Offset, hdr.Length, len(decrypted.Bytes))
 	}
 	payload := decrypted.Bytes[decrypted.Offset : int(decrypted.Offset)+int(hdr.Length)]
