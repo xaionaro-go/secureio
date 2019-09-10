@@ -207,6 +207,10 @@ func (i *Identity) MutualConfirmationOfIdentity(
 		}),
 		&opts,
 	)
+	defer func() {
+		sess.Close()
+		sess.WaitForClosure()
+	}()
 
 	n, err = sess.Write(i.Keys.Public)
 	if err != nil {
@@ -233,8 +237,6 @@ func (i *Identity) MutualConfirmationOfIdentity(
 	}
 
 	ephemeralKey = sess.GetEphemeralKey()
-	sess.Close()
-	sess.WaitForClosure()
 	return
 }
 

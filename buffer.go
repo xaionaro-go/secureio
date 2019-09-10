@@ -7,6 +7,7 @@ import (
 type Buffer struct {
 	Bytes  []byte
 	Offset int
+	isBusy bool
 }
 
 func (buf *Buffer) Read(b []byte) (int, error) {
@@ -47,11 +48,19 @@ var (
 
 func acquireBuffer() *Buffer {
 	buf := bufferPool.Get().(*Buffer)
+	if buf.isBusy {
+		panic(`should not happened`)
+	}
+	buf.isBusy = true
 	buf.Grow(maxPacketSize)
+
 	return buf
 }
-
 func (buf *Buffer) Release() {
 	buf.Reset()
+	if !buf.isBusy {
+		panic(`should not happened`)
+	}
+	buf.isBusy = false
 	bufferPool.Put(buf)
 }

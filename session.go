@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	e "errors"
+	"fmt"
 	"io"
 	"runtime"
 	"sync"
@@ -252,6 +253,10 @@ func (sess *Session) isDone() bool {
 
 func (sess *Session) readerLoop() {
 	defer func() {
+		if sess.eventHandler.IsDebugEnabled() {
+			sess.eventHandler.Debugf("/readerLoop: %v %v", sess.state.Load(), sess.isDone())
+		}
+
 		sess.cancelFunc()
 
 		for _, messenger := range sess.messenger {
@@ -271,26 +276,18 @@ func (sess *Session) readerLoop() {
 		}
 	}()
 
-	if sess.eventHandler.IsDebugEnabled() {
-		defer func() {
-			sess.eventHandler.Debugf("/readerLoop")
-		}()
-	}
-
 	cannotDecryptCount := uint(0)
 	var inputBuffer = make([]byte, maxPacketSize)
 	var decryptedBuffer Buffer
 	decryptedBuffer.Grow(maxPacketSize)
 
 	for !sess.isDoneFast() {
-		item := acquireReadItem()
-
 		if sess.eventHandler.IsDebugEnabled() {
 			sess.eventHandler.Debugf("n, err := sess.backend.Read(inputBuffer)")
 		}
 		n, err := sess.backend.Read(inputBuffer)
 		if sess.eventHandler.IsDebugEnabled() {
-			sess.eventHandler.Debugf("/n, err := sess.backend.Read(inputBuffer): %v %v", n, err)
+			sess.eventHandler.Debugf("/n, err := sess.backend.Read(inputBuffer): %v | %v | %v", n, err, sess.state.Load())
 		}
 		if err != nil {
 			if sess.isDoneFast() {
@@ -326,13 +323,13 @@ func (sess *Session) readerLoop() {
 		cannotDecryptCount = 0
 
 		if sess.messenger[hdr.Type] != nil {
-			item.Release()
-			if err := sess.messenger[hdr.Type].Handle(payload); err != nil {
+			if err := sess.messenger[hdr.Type].Handle(payload[:hdr.Length]); err != nil {
 				sess.eventHandler.Error(sess, errors.Wrap(err))
 			}
 		} else {
+			item := acquireReadItem()
 			item.Data = item.Data[0:hdr.Length]
-			copy(item.Data, payload)
+			copy(item.Data, payload[0:hdr.Length])
 			if sess.eventHandler.IsDebugEnabled() {
 				sess.eventHandler.Debugf(`sent the message %v to a messenger`, hdr)
 			}
@@ -433,6 +430,7 @@ func (sess *Session) decrypt(decrypted *Buffer, encrypted []byte) (*messageHeade
 
 func (sess *Session) checkChecksum(hdr *messageHeaders, decrypted *Buffer) error {
 	if int(decrypted.Offset)+int(hdr.Length) > len(decrypted.Bytes) {
+		fmt.Println(sess.ID(), ErrInvalidLength, hdr, decrypted.Offset, hdr.Length, len(decrypted.Bytes))
 		return errors.Wrap(ErrInvalidLength, hdr, decrypted.Offset, hdr.Length, len(decrypted.Bytes))
 	}
 	payload := decrypted.Bytes[decrypted.Offset : int(decrypted.Offset)+int(hdr.Length)]
@@ -578,6 +576,9 @@ func (sess *Session) writeMessageUsingBuffer(
 ) (n int, err error) {
 	if sess.eventHandler.IsDebugEnabled() {
 		sess.eventHandler.Debugf("writeMessageUsingBuffer: %v %v:%v", hdr, len(payload), payload)
+		defer func() {
+			sess.eventHandler.Debugf("/writeMessageUsingBuffer: %v %v", n, err)
+		}()
 	}
 
 	buf.Grow(messageHeadersSize + len(payload))
@@ -591,8 +592,7 @@ func (sess *Session) writeMessageUsingBuffer(
 		err = errors.Wrap(ErrTooBig)
 	}
 
-	switch sess.GetState() {
-	case SessionState_closed, SessionState_closing:
+	if sess.isDoneFast() {
 		return 0, errors.Wrap(ErrAlreadyClosed)
 	}
 

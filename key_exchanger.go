@@ -184,20 +184,27 @@ func (kx *keyExchanger) stop() {
 }
 
 func (kx *keyExchanger) start() {
+	kx.UpdateKey()
+	kx.iterate()
 	go kx.loop()
 }
 
 func (kx *keyExchanger) iterate() {
+	if kx.messenger.sess.eventHandler.IsDebugEnabled() {
+		kx.messenger.sess.eventHandler.Debugf("kx.iterate()")
+	}
+
 	var lastExchangeTS time.Time
 	kx.LockDo(func() {
 		lastExchangeTS = kx.lastExchangeTS
 	})
 	now := time.Now()
-	if now.Sub(lastExchangeTS) < kx.options.Interval {
+	if !lastExchangeTS.IsZero() &&
+		now.Sub(lastExchangeTS) < kx.options.Interval {
 		return
 	}
-	if !lastExchangeTS.IsZero() && now.Sub(lastExchangeTS) >
-		kx.options.Interval+kx.options.Timeout {
+	if !lastExchangeTS.IsZero() &&
+		now.Sub(lastExchangeTS) > kx.options.Interval+kx.options.Timeout {
 		_ = kx.Close()
 		kx.errFunc(errors.Wrap(ErrKeyExchangeTimeout))
 		return
@@ -211,8 +218,6 @@ func (kx *keyExchanger) iterate() {
 }
 
 func (kx *keyExchanger) loop() {
-	kx.UpdateKey()
-	kx.iterate()
 	sendPublicKeyTicker := time.NewTicker(time.Second)
 	defer sendPublicKeyTicker.Stop()
 	for {
@@ -227,6 +232,9 @@ func (kx *keyExchanger) loop() {
 }
 
 func (kx *keyExchanger) sendPublicKey() error {
+	if kx.messenger.sess.eventHandler.IsDebugEnabled() {
+		kx.messenger.sess.eventHandler.Debugf("kx.sendPublicKey()")
+	}
 	msg := &kx.localKeySeedUpdateMessage
 	copy(msg.PublicKey[:], (*kx.nextLocalPublicKey)[:])
 	kx.localIdentity.Sign(msg.Signature[:], msg.PublicKey[:])

@@ -3,12 +3,18 @@ package secureio
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/xaionaro-go/errors"
+)
+
+const (
+	testUseUnixSocket = false
 )
 
 type testLogger struct {
@@ -70,7 +76,9 @@ func (p *pipeReadWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
-func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 *pipeReadWriter) {
+var testPairMutex sync.Mutex
+
+func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 io.ReadWriteCloser) {
 	var err error
 
 	go func() {
@@ -89,26 +97,60 @@ func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 *pipeR
 		t.Fatal(err)
 	}
 
-	pipeR0, pipeW0, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
+	if testUseUnixSocket {
 
-	pipeR1, pipeW1, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
+		testPairMutex.Lock()
+		defer testPairMutex.Unlock()
 
-	conn0 = &pipeReadWriter{
-		Prefix:      "0",
-		ReadCloser:  pipeR0,
-		WriteCloser: pipeW1,
-	}
+		os.Remove(`/tmp/xaionaro-go-secureio-0.sock`)
 
-	conn1 = &pipeReadWriter{
-		Prefix:      "1",
-		ReadCloser:  pipeR1,
-		WriteCloser: pipeW0,
+		l0, err := net.Listen(`unixpacket`, `/tmp/xaionaro-go-secureio-0.sock`)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var wg sync.WaitGroup
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			conn1, err = net.Dial(`unixpacket`, `/tmp/xaionaro-go-secureio-0.sock`)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}()
+
+		conn0, err = l0.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		wg.Wait()
+
+	} else {
+
+		pipeR0, pipeW0, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		pipeR1, pipeW1, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		conn0 = &pipeReadWriter{
+			Prefix:      "0",
+			ReadCloser:  pipeR0,
+			WriteCloser: pipeW1,
+		}
+
+		conn1 = &pipeReadWriter{
+			Prefix:      "1",
+			ReadCloser:  pipeR1,
+			WriteCloser: pipeW0,
+		}
+
 	}
 
 	return

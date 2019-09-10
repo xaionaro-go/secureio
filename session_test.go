@@ -18,8 +18,8 @@ func TestSession(t *testing.T) {
 
 	identity0, identity1, conn0, conn1 := testPair(t)
 
-	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{"0", t, true, false, nil}, nil)
-	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{"1", t, true, false, nil}, nil)
+	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{"0", t, true, true, nil}, nil)
+	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{"1", t, true, true, nil}, nil)
 
 	writeBuf := make([]byte, maxPayloadSize)
 	rand.Read(writeBuf)
@@ -77,6 +77,8 @@ func benchmarkSessionWriteRead(b *testing.B, blockSize uint) {
 		b.StopTimer()
 		sess0.Close()
 		sess1.Close()
+		conn0.Close()
+		conn1.Close()
 		sess0.WaitForClosure()
 		sess1.WaitForClosure()
 	}()

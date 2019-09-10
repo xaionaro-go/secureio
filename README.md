@@ -50,3 +50,12 @@ MessageType_dataPacketType6
 MessageType_dataPacketType7
 ```
 The `MessageType_dataPacketType0` is used for default `Read()`/`Write()`.
+
+## Benchmark
+
+```
+BenchmarkSessionWriteRead1-8               85442             14045 ns/op           0.07 MB/s          18 B/op          2 allocs/op
+BenchmarkSessionWriteRead16-8              84830             13738 ns/op           1.16 MB/s          19 B/op          2 allocs/op
+BenchmarkSessionWriteRead1024-8            64996             18621 ns/op          54.99 MB/s          18 B/op          2 allocs/op
+BenchmarkSessionWriteRead32000-8            7401            146470 ns/op         218.48 MB/s          39 B/op          2 allocs/op
+```
