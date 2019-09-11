@@ -56,10 +56,14 @@ func TestIdentityMutualConfirmationOfIdentityWithPSK(t *testing.T) {
 	assert.NoError(t, err0)
 	assert.NoError(t, err1)
 	assert.Equal(t, key0, key1)
+
+	testConnIsOpen(t, conn0, conn1)
 }
 
 func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 	identity0, identity1, conn0, conn1 := testPair(t)
+	defer conn0.Close()
+	defer conn1.Close()
 
 	opts0 := &SessionOptions{}
 	opts1 := &SessionOptions{}
@@ -111,4 +115,6 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 	assert.Error(t, err1)
 	assert.Nil(t, key0)
 	assert.Nil(t, key1)
+
+	testConnIsOpen(t, conn0, conn1)
 }

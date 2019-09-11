@@ -79,7 +79,6 @@ type Session struct {
 	remoteIdentity *Identity
 	options        SessionOptions
 
-	messagesCount  uint64
 	keyExchanger   *keyExchanger
 	backend        io.ReadWriteCloser
 	messenger      [MessageTypeMax]*Messenger
@@ -90,12 +89,16 @@ type Session struct {
 	eventHandler   EventHandler
 	writeDeferChan chan *writeItem
 	stopWaitGroup  sync.WaitGroup
+
+	messagesCount               uint64
+	sequentialDecryptFailsCount uint64
 }
 
 type SessionOptions struct {
-	DetachOnMessagesCount              uint64
-	ErrorOnSequentialDecryptFailsCount *uint
-	KeyExchangerOptions                KeyExchangerOptions
+	DetachOnMessagesCount               uint64
+	DetachOnSequentialDecryptFailsCount uint64
+	ErrorOnSequentialDecryptFailsCount  *uint64
+	KeyExchangerOptions                 KeyExchangerOptions
 }
 
 func (sess *Session) WaitForState(states ...SessionState) SessionState {
@@ -166,7 +169,7 @@ func newSession(
 	}
 	if sess.options.ErrorOnSequentialDecryptFailsCount == nil {
 		sess.options.ErrorOnSequentialDecryptFailsCount =
-			&[]uint{DefaultErrorOnSequentialDecryptFailsCount}[0]
+			&[]uint64{DefaultErrorOnSequentialDecryptFailsCount}[0]
 	}
 	if *sess.options.ErrorOnSequentialDecryptFailsCount == 0 {
 		sess.options.ErrorOnSequentialDecryptFailsCount = nil
@@ -213,13 +216,20 @@ func (sess *Session) startBackendCloser() {
 		sess.setState(SessionState_closing, SessionState_closed)
 
 		msgCount := atomic.LoadUint64(&sess.messagesCount)
+		seqDecryptFailsCount := atomic.LoadUint64(&sess.sequentialDecryptFailsCount)
 		if sess.eventHandler.IsDebugEnabled() {
-			sess.eventHandler.Debugf("startBackendCloser() try: %v %v",
-				sess.options.DetachOnMessagesCount, msgCount)
+			sess.eventHandler.Debugf("startBackendCloser() try: %v %v %v %v",
+				sess.options.DetachOnMessagesCount, sess.options.DetachOnSequentialDecryptFailsCount,
+				msgCount, seqDecryptFailsCount)
 		}
 
 		if sess.options.DetachOnMessagesCount != 0 &&
 			msgCount == sess.options.DetachOnMessagesCount {
+			return
+		}
+
+		if sess.options.DetachOnSequentialDecryptFailsCount != 0 &&
+			seqDecryptFailsCount == sess.options.DetachOnSequentialDecryptFailsCount {
 			return
 		}
 
@@ -275,7 +285,6 @@ func (sess *Session) readerLoop() {
 		}
 	}()
 
-	cannotDecryptCount := uint(0)
 	var inputBuffer = make([]byte, maxPacketSize)
 	var decryptedBuffer Buffer
 	decryptedBuffer.Grow(maxPacketSize)
@@ -311,15 +320,21 @@ func (sess *Session) readerLoop() {
 		if err != nil && (err != ErrUnencrypted || hdr.Type != MessageType_keyExchange) {
 			err = errors.Wrap(err)
 			sess.eventHandler.Infof("cannot decrypt: %v", err)
-			cannotDecryptCount++
+			sequentialDecryptFailsCount := atomic.AddUint64(&sess.sequentialDecryptFailsCount, 1)
 			if sess.options.ErrorOnSequentialDecryptFailsCount != nil {
-				if cannotDecryptCount >= *sess.options.ErrorOnSequentialDecryptFailsCount {
+				if sequentialDecryptFailsCount >= *sess.options.ErrorOnSequentialDecryptFailsCount {
 					sess.eventHandler.Error(sess, err)
 				}
 			}
+			if sequentialDecryptFailsCount >= sess.options.DetachOnSequentialDecryptFailsCount {
+				if sess.eventHandler.IsDebugEnabled() {
+					sess.eventHandler.Debugf(`reached limit "DetachOnSequentialDecryptFailsCount"`)
+				}
+				return
+			}
 			continue
 		}
-		cannotDecryptCount = 0
+		atomic.StoreUint64(&sess.sequentialDecryptFailsCount, 0)
 
 		if sess.messenger[hdr.Type] != nil {
 			if err := sess.messenger[hdr.Type].Handle(payload[:hdr.Length]); err != nil {

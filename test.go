@@ -10,11 +10,13 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/xaionaro-go/errors"
 )
 
 const (
-	testUseUnixSocket = false
+	testUseUnixSocket = true
 )
 
 type testLogger struct {
@@ -154,4 +156,21 @@ func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 io.Rea
 	}
 
 	return
+}
+
+func testConnIsOpen(t *testing.T, conn0, conn1 io.ReadWriteCloser) {
+	b := []byte(`test`)
+	_, err := conn0.Write(b)
+	assert.NoError(t, err)
+
+	_, err = conn1.Write(b)
+	assert.NoError(t, err)
+
+	_, err = conn0.Read(b)
+	assert.NoError(t, err)
+	assert.Equal(t, `test`, string(b))
+
+	_, err = conn1.Read(b)
+	assert.NoError(t, err)
+	assert.Equal(t, `test`, string(b))
 }

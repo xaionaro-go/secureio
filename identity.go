@@ -11,10 +11,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/pkg/errors"
 	"golang.org/x/crypto/ed25519"
 
-	xerrors "github.com/xaionaro-go/errors"
+	"github.com/xaionaro-go/errors"
 )
 
 const (
@@ -190,18 +189,21 @@ func (i *Identity) MutualConfirmationOfIdentity(
 	if options != nil {
 		opts = *options
 	}
-	opts.ErrorOnSequentialDecryptFailsCount = &[]uint{1}[0]
+
+	// Detach from `backend` right after the first authentication message.
+	opts.DetachOnSequentialDecryptFailsCount = 1
 	opts.DetachOnMessagesCount = 1
 
+	var decryptError errors.Interface
 	sess := newSession(
 		ctx,
 		i,
 		remoteIdentity,
 		backend,
 		wrapErrorHandler(eventHandler, func(sess *Session, err error) {
-			xerr := err.(*xerrors.Error)
+			xerr := err.(*errors.Error)
 			if !xerr.Has(ErrCannotDecrypt) {
-				err = xerr
+				decryptError = xerr
 			}
 			sess.Close()
 		}),
@@ -224,6 +226,10 @@ func (i *Identity) MutualConfirmationOfIdentity(
 	remotePubKey := make([]byte, len(remoteIdentity.Keys.Public))
 	n, err = sess.Read(remotePubKey)
 	if err != nil {
+		return
+	}
+	if decryptError != nil {
+		err = errors.Wrap(decryptError)
 		return
 	}
 	if n != len(i.Keys.Public) {

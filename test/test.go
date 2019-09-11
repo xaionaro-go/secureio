@@ -46,6 +46,11 @@ func (l *testLogger) Debugf(fm string, args ...interface{}) {
 }
 func (l *testLogger) OnConnect(*secureio.Session) {
 }
+func (l *testLogger) OnInit(*secureio.Session) {
+}
+func (l *testLogger) IsDebugEnabled() bool {
+	return true
+}
 
 func fatalError(err error) {
 	if err == nil {
