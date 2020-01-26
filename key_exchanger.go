@@ -5,14 +5,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/wsddn/go-ecdh"
 	"golang.org/x/crypto/ed25519"
 	"golang.org/x/crypto/sha3"
-
-	"github.com/xaionaro-go/errors"
 )
 
 const (
@@ -32,11 +31,6 @@ var (
 	// Salt is used to append PSKs. If you change this value then
 	// it is required to change it on both sides.
 	Salt = []byte(`xaionaro-go/secureio.KeyExchanger`)
-)
-
-var (
-	ErrWrongKeySeedLength = errors.New("wrong length of the key seed")
-	ErrKeyExchangeTimeout = errors.New("key exchange timeout")
 )
 
 type keyExchanger struct {
@@ -111,7 +105,7 @@ func (kx *keyExchanger) generateSharedKey(
 ) ([]byte, error) {
 	key, err := kx.ecdh.GenerateSharedSecret(localPrivateKey, remotePublicKey)
 	if err != nil {
-		return nil, err
+		return nil, wrapErrorf("unable to generate a shared secret: %w", err)
 	}
 
 	psk := kx.options.PSK
@@ -125,7 +119,7 @@ func (kx *keyExchanger) generateSharedKey(
 		}
 	}
 
-	return key, err
+	return key, nil
 }
 
 func (kx *keyExchanger) isDone() bool {
@@ -138,9 +132,9 @@ func (kx *keyExchanger) isDone() bool {
 }
 
 func (kx *keyExchanger) Handle(b []byte) (err error) {
-	defer func() { err = errors.Wrap(err) }()
-
 	kx.LockDo(func() {
+		defer func() { err = wrapError(err) }()
+
 		msg := &kx.remoteKeySeedUpdateMessage
 		err = binary.Read(bytes.NewBuffer(b), binaryOrderType, msg)
 		if err != nil {
@@ -160,8 +154,8 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 		nextKey, genErr := kx.generateSharedKey(nextLocal, nextRemote)
 		if genErr != nil {
 			_ = kx.Close()
-			if genErr.(*errors.Error).Err != ErrAlreadyClosed || !kx.isDone() {
-				kx.errFunc(errors.Wrap(genErr))
+			if !errors.As(genErr, &ErrAlreadyClosed{}) || !kx.isDone() {
+				kx.errFunc(wrapError(genErr))
 			}
 			return
 		}
@@ -206,13 +200,13 @@ func (kx *keyExchanger) iterate() {
 	if !lastExchangeTS.IsZero() &&
 		now.Sub(lastExchangeTS) > kx.options.Interval+kx.options.Timeout {
 		_ = kx.Close()
-		kx.errFunc(errors.Wrap(ErrKeyExchangeTimeout))
+		kx.errFunc(newErrKeyExchangeTimeout())
 		return
 	}
 	err := kx.sendPublicKey()
 	if err != nil {
 		_ = kx.Close()
-		kx.errFunc(errors.Wrap(err))
+		kx.errFunc(wrapErrorf("unable to send a public key: %w", err))
 		return
 	}
 }
@@ -245,7 +239,7 @@ func (kx *keyExchanger) UpdateKey() {
 	privKey, pubKey, err := kx.ecdh.GenerateKey(rand.Reader)
 	if err != nil {
 		_ = kx.Close()
-		kx.errFunc(errors.Wrap(err))
+		kx.errFunc(wrapErrorf("unable to generate ECDH keys: %w", err))
 		return
 	}
 	kx.nextLocalPrivateKey = privKey.(*[PrivateKeySize]byte)
@@ -254,5 +248,9 @@ func (kx *keyExchanger) UpdateKey() {
 }
 
 func (kx *keyExchanger) send(msg *keySeedUpdateMessage) error {
-	return binary.Write(kx.messenger, binaryOrderType, msg)
+	err := binary.Write(kx.messenger, binaryOrderType, msg)
+	if err != nil {
+		return wrapErrorf("unable to send keySeedUpdateMessage: %w", err)
+	}
+	return nil
 }

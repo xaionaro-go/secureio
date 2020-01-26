@@ -5,25 +5,19 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/pem"
-	"fmt"
+	"errors"
 	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 
 	"golang.org/x/crypto/ed25519"
-
-	"github.com/xaionaro-go/errors"
 )
 
 const (
 	//authorizedKeysFileName = `authorized_keys`
 	publicFileName  = `id_ed25519`
 	privateFileName = `id_ed25519.pub`
-)
-
-var (
-	ErrInvalidSignature = errors.New("invalid signature")
 )
 
 type Keys struct {
@@ -87,7 +81,7 @@ func (i *Identity) savePrivateKey(keysDir string) error {
 func saveKeyToPemFile(keyType string, key []byte, filePath string) error {
 	keyFile, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE, 0600)
 	if err != nil {
-		return err
+		return wrapErrorf("unable to open file: %w", err)
 	}
 
 	keyBlock := pem.Block{
@@ -96,31 +90,36 @@ func saveKeyToPemFile(keyType string, key []byte, filePath string) error {
 		Bytes:   key,
 	}
 
-	return pem.Encode(keyFile, &keyBlock)
+	err = pem.Encode(keyFile, &keyBlock)
+	if err != nil {
+		return wrapErrorf("pem.Encode() returned an error: %w", err)
+	}
+
+	return nil
 }
 
 func (i *Identity) generateAndSaveKeys(keysDir string) error {
 	var err error
 	i.Keys.Public, i.Keys.Private, err = ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return errors.Wrap(err, "Cannot generate keys")
+		return wrapErrorf("cannot generate keys: %w", err)
 	}
 	err = i.savePrivateKey(keysDir)
 	if err == nil {
 		err = i.savePublicKey(keysDir)
 	}
-	return errors.Wrap(err, "Cannot save keys")
+	return wrapErrorf("cannot save keys: %w", err)
 }
 
 func loadPublicKeyFromFile(keyPtr *ed25519.PublicKey, path string) error {
 	keyBytes, err := ioutil.ReadFile(path)
 	if err != nil {
-		return err
+		return wrapErrorf("unable to read key: %w", err)
 	}
 
 	block, _ := pem.Decode(keyBytes)
 	if len(block.Bytes) != ed25519.PublicKeySize {
-		return fmt.Errorf("Read key is of wrong length: %d != %d", len(block.Bytes), ed25519.PublicKeySize)
+		return newErrWrongKeyLength(ed25519.PublicKeySize, uint(len(block.Bytes)))
 	}
 	*keyPtr = block.Bytes
 	return nil
@@ -129,12 +128,12 @@ func loadPublicKeyFromFile(keyPtr *ed25519.PublicKey, path string) error {
 func loadPrivateKeyFromFile(keyPtr *ed25519.PrivateKey, path string) error {
 	keyBytes, err := ioutil.ReadFile(path)
 	if err != nil {
-		return err
+		return wrapErrorf("unable to read file: %w", err)
 	}
 
 	block, _ := pem.Decode(keyBytes)
 	if len(block.Bytes) != ed25519.PrivateKeySize {
-		return fmt.Errorf("Read key is of wrong length: %d != %d", len(block.Bytes), ed25519.PrivateKeySize)
+		return newErrWrongKeyLength(ed25519.PrivateKeySize, uint(len(block.Bytes)))
 	}
 	*keyPtr = block.Bytes
 	return nil
@@ -143,7 +142,7 @@ func loadPrivateKeyFromFile(keyPtr *ed25519.PrivateKey, path string) error {
 func (i *Identity) loadKeys(keysDir string) error {
 	err := loadPrivateKeyFromFile(&i.Keys.Private, filepath.Join(keysDir, privateFileName))
 	if err != nil {
-		return errors.Wrap(err, "Cannot load the private key")
+		return wrapErrorf("Cannot load the private key: %w", err)
 	}
 	i.Keys.Public = i.Keys.Private.Public().(ed25519.PublicKey)
 	return nil
@@ -152,7 +151,7 @@ func (i *Identity) loadKeys(keysDir string) error {
 func (i *Identity) prepareKeys(keysDir string) error {
 	err := os.MkdirAll(keysDir, os.FileMode(0700))
 	if err != nil {
-		return errors.Wrap(err, "Cannot create the directory: "+keysDir)
+		return wrapErrorf(`cannot create the directory "%s": %w`, keysDir, err)
 	}
 	if _, err := os.Stat(filepath.Join(keysDir, privateFileName)); os.IsNotExist(err) {
 		return i.generateAndSaveKeys(keysDir)
@@ -163,7 +162,10 @@ func (i *Identity) prepareKeys(keysDir string) error {
 			err = i.savePublicKey(keysDir)
 		}
 	}
-	return errors.Wrap(err, "Cannot load keys")
+	if err != nil {
+		return newErrCannotLoadKeys(err)
+	}
+	return nil
 }
 
 func (i *Identity) NewSession(
@@ -182,7 +184,7 @@ func (i *Identity) MutualConfirmationOfIdentity(
 	backend io.ReadWriteCloser,
 	eventHandler EventHandler,
 	options *SessionOptions,
-) (err error, ephemeralKey []byte) {
+) (xerr error, ephemeralKey []byte) {
 	var n int
 
 	var opts SessionOptions
@@ -194,51 +196,56 @@ func (i *Identity) MutualConfirmationOfIdentity(
 	opts.DetachOnSequentialDecryptFailsCount = 1
 	opts.DetachOnMessagesCount = 1
 
-	var decryptError errors.Interface
+	var decryptError error
 	sess := newSession(
 		ctx,
 		i,
 		remoteIdentity,
 		backend,
-		wrapErrorHandler(eventHandler, func(sess *Session, err error) {
-			xerr := err.(*errors.Error)
-			if !xerr.Has(ErrCannotDecrypt) {
-				decryptError = xerr
+		wrapErrorHandler(eventHandler, func(sess *Session, err error) bool {
+			if errors.As(err, &ErrCannotDecrypt{}) {
+				decryptError = err
 			}
-			sess.Close()
+			if eventHandler.IsDebugEnabled() {
+				eventHandler.Debugf(`closing the backend due to %v`, err)
+			}
+			_ = sess.Close()
+			return false
 		}),
 		&opts,
 	)
 	defer func() {
-		sess.Close()
+		_ = sess.Close()
 		sess.WaitForClosure()
 	}()
 
-	n, err = sess.Write(i.Keys.Public)
+	n, err := sess.Write(i.Keys.Public)
 	if err != nil {
+		xerr = wrapErrorf(`unable to write via a session: %w`, err)
 		return
 	}
 	if n != len(i.Keys.Public) {
-		err = errors.Wrap(ErrPartialWrite, `unable to send my public key`)
+		xerr = wrapErrorf(`unable to send my public key: %w`, newErrPartialWrite())
 		return
 	}
 
 	remotePubKey := make([]byte, len(remoteIdentity.Keys.Public))
 	n, err = sess.Read(remotePubKey)
 	if err != nil {
+		xerr = wrapErrorf(`unable to read data via session: %w`, err)
 		return
 	}
 	if decryptError != nil {
-		err = errors.Wrap(decryptError)
+		xerr = wrapErrorf(`unable to decrypt: %w`, decryptError)
 		return
 	}
 	if n != len(i.Keys.Public) {
-		err = errors.Wrap(ErrInvalidLength, `unable to receive remote public key`)
+		xerr = newErrWrongKeyLength(uint(len(i.Keys.Public)), uint(n))
 		return
 	}
 
 	if bytes.Compare(remoteIdentity.Keys.Public, remotePubKey) != 0 {
-		err = errors.Wrap(ErrInvalidSignature, `unexpected error`)
+		xerr = newErrInvalidSignature()
 		return
 	}
 
@@ -248,7 +255,7 @@ func (i *Identity) MutualConfirmationOfIdentity(
 
 func (i *Identity) VerifySignature(signature, data []byte) error {
 	if !ed25519.Verify(i.Keys.Public, data, signature) {
-		return ErrInvalidSignature
+		return newErrInvalidSignature()
 	}
 	return nil
 }

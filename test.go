@@ -27,12 +27,13 @@ type testLogger struct {
 	Session     *Session
 }
 
-func (l *testLogger) Error(sess *Session, err error) {
+func (l *testLogger) Error(sess *Session, err error) bool {
 	xerr := err.(*errors.Error)
 	if xerr.Has(io.EOF) {
-		return
+		return false
 	}
 	l.T.Errorf("E:%v:SID:%v:%v", l.T.Name(), sess.ID(), xerr)
+	return false
 }
 func (l *testLogger) Infof(format string, args ...interface{}) {
 	if !l.enableInfo {

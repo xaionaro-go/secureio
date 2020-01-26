@@ -35,8 +35,9 @@ type testLogger struct {
 	string
 }
 
-func (l *testLogger) Error(sess *secureio.Session, err error) {
+func (l *testLogger) Error(sess *secureio.Session, err error) bool {
 	fmt.Print(err)
+	return false
 }
 func (l *testLogger) Infof(fm string, args ...interface{}) {
 	fmt.Printf(l.string+" [I] "+fm+"\n", args...)
@@ -63,11 +64,11 @@ func main() {
 	dir := `/tmp/.test_xaionaro-go_secureio_session_`
 	_ = os.Mkdir(dir+"0", 0700)
 	_ = os.Mkdir(dir+"1", 0700)
-	identity0, err := secureio.NewIdentity(dir + "0")
-	fatalError(err)
+	identity0, xerr := secureio.NewIdentity(dir + "0")
+	fatalError(xerr)
 
-	identity1, err := secureio.NewIdentity(dir + "1")
-	fatalError(err)
+	identity1, xerr := secureio.NewIdentity(dir + "1")
+	fatalError(xerr)
 
 	pipeR0, pipeW0, err := os.Pipe()
 	fatalError(err)

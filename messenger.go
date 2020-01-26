@@ -1,12 +1,7 @@
 package secureio
 
 import (
-	"errors"
 	"sync/atomic"
-)
-
-var (
-	ErrPartialWrite = errors.New("partial write")
 )
 
 type Handler interface {
@@ -48,4 +43,15 @@ func (w *Messenger) Close() error {
 
 func (w *Messenger) SetHandler(handler Handler) {
 	w.handler = handler
+}
+
+type DummyMessenger struct {
+}
+
+func (d DummyMessenger) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+
+func (d DummyMessenger) Handle(p []byte) error {
+	return nil
 }
