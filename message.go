@@ -3,10 +3,10 @@ package secureio
 import (
 	"crypto/aes"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/xaionaro-go/slice"
 	"github.com/xaionaro-go/unsafetools"
@@ -24,6 +24,7 @@ const (
 
 var (
 	maxPayloadSize uint32
+	nextPacketID   uint64 // is used as nonce
 )
 
 func init() {
@@ -34,6 +35,10 @@ func SetMaxPayloadSize(newSize uint32) {
 	newSize &= ^(uint32(aes.BlockSize) - 1)
 	atomic.StoreUint32(&maxPayloadSize, newSize)
 }
+
+var (
+	poly1305KeyXORer = []byte("github.com/xaionaro-go/secureio github.com/xaionaro-go/secureio github.com/xaionaro-go/secureio github.com/xaionaro-go/secureio")
+)
 
 type MessageType uint8
 
@@ -135,36 +140,34 @@ func (flags *MessagesContainerFlags) SetIsEncrypted(newValue bool) {
 	}
 }
 
-type Time [ivSize]byte
+type packetID [ivSize]byte
 
-func (t *Time) Time() time.Time {
-	nanoseconds := binaryOrderType.Uint64(t[:])
-	return time.Unix(0, int64(nanoseconds))
+func (id *packetID) Value() uint64 {
+	return binaryOrderType.Uint64(id[:])
 }
-func (t *Time) String() string {
-	return t.Time().String()
+func (id *packetID) String() string {
+	return fmt.Sprint(id.Value())
 }
-func (t *Time) Set(v time.Time) {
-	nanoseconds := uint64(v.UnixNano())
-	binaryOrderType.PutUint64((*t)[:], nanoseconds)
+func (id *packetID) SetNextPacketID() {
+	binaryOrderType.PutUint64((*id)[:], atomic.AddUint64(&nextPacketID, 1))
 }
-func (t *Time) Read(b []byte) (int, error) {
+func (id *packetID) Read(b []byte) (int, error) {
 	if len(b) < ivSize {
 		return 0, newErrTooShort(ivSize, uint(len(b)))
 	}
-	copy((*t)[:], b)
+	copy((*id)[:], b)
 	return ivSize, nil
 }
-func (t *Time) Write(b []byte) (int, error) {
+func (id *packetID) Write(b []byte) (int, error) {
 	if len(b) < ivSize {
 		return 0, newErrTooShort(ivSize, uint(len(b)))
 	}
-	copy(b, (*t)[:])
+	copy(b, (*id)[:])
 	return ivSize, nil
 }
 
 type messagesContainerHeadersData struct {
-	Time Time // Should be the first. It is used to decrypt other values!
+	PacketID packetID // Should be the first. It is used to decrypt other values!
 
 	ContainerHeadersChecksum [poly1305.TagSize]byte
 	MessagesChecksum         [poly1305.TagSize]byte
@@ -256,14 +259,17 @@ func (hdr *messageHeadersData) Write(b []byte) (int, error) {
 	return int(messageHeadersSize), nil
 }
 
-func (containerHdr *messagesContainerHeadersData) UpdateTime() {
-	containerHdr.Time.Set(time.Now())
+func (containerHdr *messagesContainerHeadersData) UpdatePacketID() {
+	containerHdr.PacketID.SetNextPacketID()
 }
 
 func (containerHdr *messagesContainerHeadersData) calculatePoly1305Key(cipherKey []byte) (result [32]byte) {
-	copy(result[:ivSize], containerHdr.Time[:])
+	copy(result[:ivSize], containerHdr.PacketID[:])
 	copy(result[ivSize:], cipherKey)
 	result = blake3.Sum256(result[:])
+	for idx := range result {
+		result[idx] ^= poly1305KeyXORer[idx]
+	}
 	return result
 }
 
@@ -290,7 +296,7 @@ func (containerHdr *messagesContainerHeadersData) Read(b []byte) (int, error) {
 		return 0, newErrTooShort(messagesContainerHeadersSize, uint(len(b)))
 	}
 
-	ivN, err := containerHdr.Time.Read(b)
+	ivN, err := containerHdr.PacketID.Read(b)
 	if err != nil {
 		return 0, wrapError(err)
 	}
@@ -324,7 +330,7 @@ func (containerHdr *messagesContainerHeadersData) Write(b []byte) (int, error) {
 		return 0, newErrTooShort(messagesContainerHeadersSize, uint(len(b)))
 	}
 
-	_, err := containerHdr.Time.Write(b)
+	_, err := containerHdr.PacketID.Write(b)
 	if err != nil {
 		return 0, wrapError(err)
 	}
@@ -390,7 +396,7 @@ func (pool *messagesContainerHeadersPool) AcquireMessagesContainerHeaders() *mes
 		panic(`should not happened`)
 	}
 	containerHdr.isBusy = true
-	containerHdr.UpdateTime()
+	containerHdr.UpdatePacketID()
 	return containerHdr
 }
 

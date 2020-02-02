@@ -49,17 +49,17 @@ type Session struct {
 	options        SessionOptions
 	maxPacketSize  uint32
 
-	keyExchanger          *keyExchanger
-	backend               io.ReadWriteCloser
-	messenger             [MessageTypeMax]*Messenger
-	ReadChan              [MessageTypeMax]chan *ReadItem
-	currentSecret         []byte
-	cipherKey             *[]byte
-	previousCipherKey     *[]byte
-	waitForCipherKeyChan  chan struct{}
-	eventHandler          EventHandler
-	stopWaitGroup         sync.WaitGroup
-	lastReceivedTimestamp time.Time
+	keyExchanger         *keyExchanger
+	backend              io.ReadWriteCloser
+	messenger            [MessageTypeMax]*Messenger
+	ReadChan             [MessageTypeMax]chan *ReadItem
+	currentSecret        []byte
+	cipherKey            *[]byte
+	previousCipherKey    *[]byte
+	waitForCipherKeyChan chan struct{}
+	eventHandler         EventHandler
+	stopWaitGroup        sync.WaitGroup
+	lastReceivedPacketID uint64
 
 	bufferPool                   *bufferPool
 	sendInfoPool                 *sendInfoPool
@@ -81,7 +81,7 @@ type Session struct {
 	sentMessagesCount           uint64
 	receivedMessagesCount       uint64
 	sequentialDecryptFailsCount uint64
-	unexpectedTimestampCount    uint64
+	unexpectedPacketIDCount     uint64
 
 	delayedSenderLoopCount uint32
 
@@ -442,17 +442,17 @@ func (sess *Session) readerLoop() {
 			}
 			continue
 		}
-		messageTimestamp := containerHdr.Time.Time()
+		packetID := containerHdr.PacketID.Value()
 		if !sess.options.AllowReorderingAndDuplication &&
-			!messageTimestamp.After(sess.lastReceivedTimestamp) {
+			packetID <= sess.lastReceivedPacketID {
 			sess.ifDebug(func() {
 				sess.debugf(`wrong order: %v is not greater than %v`,
-					messageTimestamp.UnixNano(), sess.lastReceivedTimestamp.UnixNano())
+					packetID, sess.lastReceivedPacketID)
 			})
-			atomic.AddUint64(&sess.unexpectedTimestampCount, 1)
+			atomic.AddUint64(&sess.unexpectedPacketIDCount, 1)
 			continue
 		}
-		sess.lastReceivedTimestamp = messageTimestamp
+		sess.lastReceivedPacketID = packetID
 		atomic.StoreUint64(&sess.sequentialDecryptFailsCount, 0)
 
 		sess.processIncomingMessages(containerHdr, messagesBytes)
@@ -552,7 +552,7 @@ func (sess *Session) decrypt(
 	containerHdr = sess.messagesContainerHeadersPool.AcquireMessagesContainerHeaders()
 
 	// copying the IV (it's not encrypted)
-	_, err = containerHdr.Time.Read(encrypted)
+	_, err = containerHdr.PacketID.Read(encrypted)
 	if err != nil {
 		err = wrapError(err)
 		return
@@ -566,12 +566,12 @@ func (sess *Session) decrypt(
 		decrypted.Grow(uint(len(encrypted)))
 
 		if cipherKey != nil {
-			decrypt(cipherKey, containerHdr.Time[:], decrypted.Bytes, encrypted)
+			decrypt(cipherKey, containerHdr.PacketID[:], decrypted.Bytes, encrypted)
 
 			if len(encrypted) < 200 {
 				sess.ifDebug(func() {
 					sess.debugf("decrypted: iv:%v dec:%v enc:%v dec_len:%v cipher_key:%v",
-						([ivSize]byte)(containerHdr.Time), decrypted.Bytes, encrypted, decrypted.Len(), cipherKey)
+						([ivSize]byte)(containerHdr.PacketID), decrypted.Bytes, encrypted, decrypted.Len(), cipherKey)
 				})
 			}
 		} else {
@@ -1194,14 +1194,14 @@ func (sess *Session) sendMessages(
 		plainBytes := buf.Bytes[:size]
 
 		encryptedBytes := encrypted.Bytes[:size]
-		encrypt(cipherKey, containerHdr.Time[:], encryptedBytes[ivSize:], plainBytes[ivSize:])
-		copy(encryptedBytes[:ivSize], containerHdr.Time[:]) // copying the plain IV
+		encrypt(cipherKey, containerHdr.PacketID[:], encryptedBytes[ivSize:], plainBytes[ivSize:])
+		copy(encryptedBytes[:ivSize], containerHdr.PacketID[:]) // copying the plain IV
 		sess.ifDebug(func() {
 			if len(encryptedBytes) >= 200 {
 				return
 			}
 			sess.debugf("iv == %v; encrypted == %v; plain == %v, cipherKey == %+v",
-				containerHdr.Time[:], encryptedBytes[ivSize:], plainBytes[ivSize:], cipherKey)
+				containerHdr.PacketID[:], encryptedBytes[ivSize:], plainBytes[ivSize:], cipherKey)
 		})
 		outBytes = encryptedBytes
 	}

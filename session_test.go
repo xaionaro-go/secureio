@@ -372,7 +372,8 @@ func TestHackerDuplicateMessage(t *testing.T) {
 	// Intercepting a message
 
 	// sess1.SetPause(true) will temporary pause sess1 _after_ receiving
-	// the next message.
+	// the next message. So we will be able to read from `conn1` to
+	// intercept a message.
 	sess1.WaitForState(SessionState_established)
 	assert.True(t, sess1.SetPause(true))
 
@@ -425,17 +426,17 @@ func TestHackerDuplicateMessage(t *testing.T) {
 		_, err = sess1.Read(readBuf)
 		assert.NoError(t, err)
 
-		if !assert.Equal(t, uint64(1), sess1.unexpectedTimestampCount) {
+		if !assert.Equal(t, uint64(1), sess1.unexpectedPacketIDCount) {
 			// Unblocking the goroutine below (with `runtime.Gosched()`)
 			// if required.
-			sess1.unexpectedTimestampCount = 1
+			sess1.unexpectedPacketIDCount = 1
 		}
 	}()
 
 	successfullyIgnoredTheDuplicate := false
-	assert.Equal(t, uint64(0), sess1.unexpectedTimestampCount)
+	assert.Equal(t, uint64(0), sess1.unexpectedPacketIDCount)
 	go func() {
-		for sess1.unexpectedTimestampCount == 0 {
+		for sess1.unexpectedPacketIDCount == 0 {
 			runtime.Gosched()
 		}
 		successfullyIgnoredTheDuplicate = true
