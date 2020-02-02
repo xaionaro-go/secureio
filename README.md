@@ -77,10 +77,14 @@ BenchmarkSessionWriteMessageAsyncRead1300_max1400-8   	  117862	     10277 ns/op
 
 ### Key exchange
 
-Key exchange is performed via ED25519. [If a PSK is set, then
+Key exchange is performed via ED25519. [Also if a PSK is set, then
 the PSK is concatenated with a constant salt-value, hashed with
 `sha3.Sum256`. And this value is XOR-ed with the key received
-via ED25519](https://github.com/xaionaro-go/secureio/blob/ccd4d864545620b5483c88df91491817e4f0a442/key_exchanger.go#L111). The resulting value is used a PSK for ChaCha20 encryption.
+via ED25519](https://github.com/xaionaro-go/secureio/blob/ccd4d864545620b5483c88df91491817e4f0a442/key_exchanger.go#L111).
+If PSK is not set then just a key received via ED25519 is used
+(without any modifications).
+
+The resulting value is used as the encryption key for ChaCha20.
 This key is called `cipherKey` within the code.
 
 The key received via ED25510 is updated [every minute](https://github.com/xaionaro-go/secureio/blob/ccd4d864545620b5483c88df91491817e4f0a442/key_exchanger.go#L18).
