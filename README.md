@@ -1,3 +1,5 @@
+[![GoDoc](https://godoc.org/github.com/xaionaro-go/secureio?status.svg)](https://godoc.org/github.com/xaionaro-go/secureio)
+
 # Quick start
 
 Encrypted `io.WriteReadCloser`, easy:
