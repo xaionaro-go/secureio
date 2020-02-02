@@ -108,7 +108,10 @@ func (i *Identity) generateAndSaveKeys(keysDir string) error {
 	if err == nil {
 		err = i.savePublicKey(keysDir)
 	}
-	return wrapErrorf("cannot save keys: %w", err)
+	if err != nil {
+		return wrapErrorf("cannot save keys: %w", err)
+	}
+	return nil
 }
 
 func loadPublicKeyFromFile(keyPtr *ed25519.PublicKey, path string) error {

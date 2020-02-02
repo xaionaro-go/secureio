@@ -279,7 +279,7 @@ func benchmarkSessionWriteRead(
 				case <-sendInfo.C:
 				}
 				if sendInfo.Err != nil {
-					if errors.As(sendInfo.Err, &ErrAlreadyClosed{}) {
+					if !errors.As(sendInfo.Err, &ErrAlreadyClosed{}) && !errors.As(sendInfo.Err, &ErrCanceled{}) {
 						panic(sendInfo.Err)
 					}
 				}
@@ -374,22 +374,26 @@ func TestHackerDuplicateMessage(t *testing.T) {
 	// sess1.SetPause(true) will temporary pause sess1 _after_ receiving
 	// the next message. So we will be able to read from `conn1` to
 	// intercept a message.
-	sess1.WaitForState(SessionState_established)
-	assert.True(t, sess1.SetPause(true))
+	for !sess1.SetPause(true) {
+		sess1.WaitForState(SessionState_established)
+	}
 
 	// The next message:
-	_, err := sess0.Write(writeBuf)
-	assert.NoError(t, err)
+	if sess1.IsReading() {
+		_, err := sess0.Write(writeBuf)
+		assert.NoError(t, err)
 
-	_, err = sess1.Read(readBuf)
-	assert.NoError(t, err)
+		_, err = sess1.Read(readBuf)
+		assert.NoError(t, err)
 
-	assert.Equal(t, writeBuf, readBuf)
+		assert.Equal(t, writeBuf, readBuf)
+	}
+
 	rand.Read(writeBuf)
 
 	// Now sess1 is paused (does not listen for traffic
 	// and now we can intercept it), so sending a message:
-	_, err = sess0.Write(writeBuf)
+	_, err := sess0.Write(writeBuf)
 	assert.NoError(t, err)
 
 	// And intercepting it:

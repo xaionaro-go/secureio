@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"runtime"
 	"sync"
@@ -89,6 +90,7 @@ type Session struct {
 	debugOutputChan chan DebugOutputEntry
 
 	pauseLocker sync.Mutex
+	isReading   uint64
 }
 type DebugOutputEntry struct {
 	format string
@@ -322,7 +324,7 @@ func (sess *Session) isDone() bool {
 // Returns true if the action was successful.
 func (sess *Session) SetPause(newValue bool) (result bool) {
 	sess.debugf("SetPause(%v)", newValue)
-	defer sess.debugf("SetPause(%v) -> %v", newValue, result)
+	defer func() { sess.debugf("SetPause(%v) -> %v", newValue, result) }()
 
 	badStates := []SessionState{
 		SessionState_new,
@@ -357,6 +359,19 @@ func (sess *Session) waitForUnpause() {
 	sess.pauseLocker.Lock()
 	sess.pauseLocker.Unlock()
 	sess.debugf("the blocking of readerLoop() by a pause has finished, continuing...")
+}
+
+func (sess *Session) IsReading() bool {
+	return atomic.LoadUint64(&sess.isReading) != 0
+}
+func (sess *Session) setIsReading(v bool) {
+	var newValue uint64
+	if v {
+		newValue = 1
+	} else {
+		newValue = 0
+	}
+	atomic.StoreUint64(&sess.isReading, newValue)
 }
 
 func (sess *Session) readerLoop() {
@@ -394,7 +409,9 @@ func (sess *Session) readerLoop() {
 	for !sess.isDoneFast() {
 		sess.ifDebug(func() { sess.debugf("n, err := sess.backend.Read(inputBuffer)") })
 		sess.waitForUnpause()
+		sess.setIsReading(true)
 		n, err := sess.backend.Read(inputBuffer)
+		sess.setIsReading(false)
 		sess.ifDebug(func() {
 			sess.debugf("/n, err := sess.backend.Read(inputBuffer): %v | %v | %v", n, err, sess.state.Load())
 		})
@@ -892,14 +909,18 @@ func (sess *Session) writeMessageAsync(
 			return
 		}
 
-		if !func() (result bool) {
+		sendToSendDelayedNowChan := func() (result bool) {
 			defer func() {
 				result = recover() == nil
 			}()
-			sendInfo.incRefCount()
+			if sendInfo.incRefCount() == 1 {
+				panic(fmt.Sprintf("%+v", sendInfo))
+			}
 			sess.sendDelayedNowChan <- sendInfo
 			return
-		}() || sess.isDoneFast() {
+		}
+
+		if !sendToSendDelayedNowChan() || sess.isDoneFast() {
 			sess.debugf("sess.sendDelayedNowChan is closed :(")
 			sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 			sendInfo.Err = newErrCanceled()
@@ -908,7 +929,27 @@ func (sess *Session) writeMessageAsync(
 			return
 		}
 
-		<-sendInfo.C
+		func() {
+			ticker := time.NewTicker(DefaultSendDelay * 2)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-sendInfo.C:
+					return
+				case <-ticker.C:
+					// TODO: fix this:
+					// There's some race-condition somewhere in the code, so
+					// the timer of sendDelayedLoop mis-fires sometimes and
+					// the real message is never sent. As temporary solution
+					// we just retry until the job will be done :(
+					// This is what is "ticker" for.
+					//
+					// It should be reliable and does not affect performance,
+					// but still it is very ugly...
+					sendToSendDelayedNowChan()
+				}
+			}
+		}()
 	}
 
 	return
@@ -984,7 +1025,9 @@ func (sess *Session) appendToDelayedWriteBuffer(
 
 		// No atomicity is required here (with sendInfo) because delayedWriteBuf's Lock handles this problem
 		sendInfo = sess.delayedSendInfo
-		sendInfo.incRefCount()
+		if sendInfo.incRefCount() == 1 {
+			panic(fmt.Sprintf("%+v", sendInfo))
+		}
 		sess.delayedSenderTimerLocker.LockDo(func() {
 			sess.delayedSenderTimer.Reset(*sess.options.SendDelay)
 		})
@@ -1102,8 +1145,7 @@ func (sess *Session) delayedSenderLoop() {
 		close(sess.sendDelayedNowChan)
 	}()
 	var lastSendID uint64
-	retimer := time.NewTimer(*sess.options.SendDelay)
-	retimer.Stop()
+
 	for func() bool {
 		select {
 		case sendInfo := <-sess.sendDelayedNowChan:
@@ -1117,19 +1159,7 @@ func (sess *Session) delayedSenderLoop() {
 			sess.debugf("delayedSenderLoop(): <-sess.ctx.Done()")
 			return false
 		case <-sess.delayedSenderTimer.C:
-			// TODO: fix this:
-			// There's some race-condition somewhere in the code, so
-			// this timer is mis-fires sometimes and the real message is
-			// never sent. As temporary solution we just add a one more
-			// fire after the same delay :(. This is what is "retimer" for.
-			//
-			// It should be reliable and does not affect performance,
-			// but still it is very ugly...
-			retimer.Stop()
-			retimer.Reset(*sess.options.SendDelay)
 			sess.debugf("delayedSenderLoop(): <-sess.delayedSenderTimer.C")
-		case <-retimer.C:
-			sess.debugf("delayedSenderLoop(): <-retimer.C")
 		}
 
 		sendID := sess.sendDelayedNow(0, true)

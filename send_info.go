@@ -70,8 +70,8 @@ func (sendInfo *SendInfo) reset() {
 	sendInfo.N = 0
 }
 
-func (sendInfo *SendInfo) incRefCount() {
-	atomic.AddInt32(&sendInfo.refCount, 1)
+func (sendInfo *SendInfo) incRefCount() int32 {
+	return atomic.AddInt32(&sendInfo.refCount, 1)
 }
 
 func (sendInfo *SendInfo) Release() {
@@ -87,8 +87,8 @@ func (sendInfo *SendInfo) Release() {
 }
 
 func (sendInfo *SendInfo) String() string {
-	return fmt.Sprintf("{C: %v; Err: %v: N: %v: SendID: %v, refCount: %v, isBusy: %v}",
-		sendInfo.C, sendInfo.Err, sendInfo.N, sendInfo.SendID, atomic.LoadInt32(&sendInfo.refCount), sendInfo.isBusy)
+	return fmt.Sprintf("{C: %v; Err: %v: N: %v: SendID: %v, refCount: %v}",
+		sendInfo.C, sendInfo.Err, sendInfo.N, sendInfo.SendID, atomic.LoadInt32(&sendInfo.refCount))
 }
 func (sendInfo *SendInfo) Wait() {
 	<-sendInfo.C

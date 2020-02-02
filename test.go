@@ -98,7 +98,7 @@ func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 io.Rea
 		http.ListenAndServe("localhost:6060", nil)
 	}()
 
-	dir := `/tmp/.test_xaionaro-go_secureio_session_`
+	dir := fmt.Sprintf(`/tmp/.test_xaionaro-go_secureio_session-%d_`, os.Getpid())
 	_ = os.Mkdir(dir+"0", 0700)
 	_ = os.Mkdir(dir+"1", 0700)
 	identity0, err = NewIdentity(dir + "0")
@@ -115,9 +115,10 @@ func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 io.Rea
 		testPairMutex.Lock()
 		defer testPairMutex.Unlock()
 
-		os.Remove(`/tmp/xaionaro-go-secureio-0.sock`)
+		sockPath := fmt.Sprintf(`/tmp/xaionaro-go-secureio-%d-0.sock`, os.Getpid())
+		_ = os.Remove(sockPath)
 
-		l0, err := net.Listen(`unixpacket`, `/tmp/xaionaro-go-secureio-0.sock`)
+		l0, err := net.Listen(`unixpacket`, sockPath)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -127,7 +128,7 @@ func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 io.Rea
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			conn1, err = net.Dial(`unixpacket`, `/tmp/xaionaro-go-secureio-0.sock`)
+			conn1, err = net.Dial(`unixpacket`, sockPath)
 			if err != nil {
 				t.Fatal(err)
 			}
