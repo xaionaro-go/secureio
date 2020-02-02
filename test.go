@@ -20,11 +20,8 @@ const (
 )
 
 type testLogger struct {
-	string
 	*testing.T
-	enableInfo  bool
-	enableDebug bool
-	Session     *Session
+	Session *Session
 }
 
 func (l *testLogger) Error(sess *Session, err error) bool {
@@ -35,25 +32,10 @@ func (l *testLogger) Error(sess *Session, err error) bool {
 	l.T.Errorf("E:%v:SID:%v:%v", l.T.Name(), sess.ID(), xerr)
 	return false
 }
-func (l *testLogger) Infof(format string, args ...interface{}) {
-	if !l.enableInfo {
-		fmt.Printf("I:%v:SID:%v: "+format+"\n",
-			append([]interface{}{l.T.Name(), l.Session.ID()}, args...)...)
-		return
-	}
-	l.T.Errorf(l.string+" [I] "+format, args...)
-}
-func (l *testLogger) Debugf(format string, args ...interface{}) {
-	fmt.Printf("D:%v:SID:%v: "+format+"\n",
-		append([]interface{}{l.T.Name(), l.Session.ID()}, args...)...)
-}
 func (l *testLogger) OnConnect(sess *Session) {
 }
 func (l *testLogger) OnInit(sess *Session) {
 	l.Session = sess
-}
-func (l *testLogger) IsDebugEnabled() bool {
-	return l.enableDebug
 }
 
 type pipeReadWriter struct {
@@ -81,6 +63,34 @@ func (p *pipeReadWriter) Write(b []byte) (int, error) {
 
 var testPairMutex sync.Mutex
 
+func readLogsOfSession(t *testing.T, enableInfo bool, sess *Session) {
+	fmt.Println("runned logger")
+	go func() {
+		defer fmt.Println("stopped logger")
+		for {
+			select {
+			case debugOutput, ok := <-sess.DebugOutputChan():
+				if !ok {
+					return
+				}
+				fmt.Printf("D:%v:SID:%v: "+debugOutput.format+"\n",
+					append([]interface{}{t.Name(), sess.ID()}, debugOutput.args...)...)
+			case infoOutput, ok := <-sess.InfoOutputChan():
+				if !ok {
+					return
+				}
+				if !enableInfo {
+					fmt.Printf("I:%v:SID:%v: "+infoOutput.format+"\n",
+						append([]interface{}{t.Name(), sess.ID()}, infoOutput.args...)...)
+					return
+				}
+				t.Errorf("[I] "+infoOutput.format, infoOutput.args...)
+			}
+		}
+	}()
+}
+
+//go:norace
 func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 io.ReadWriteCloser) {
 	var err error
 

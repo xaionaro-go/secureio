@@ -4,19 +4,14 @@ type EventHandler interface {
 	OnInit(*Session)
 	OnConnect(*Session)
 	Error(*Session, error) bool
-	Infof(string, ...interface{})
-	Debugf(string, ...interface{})
-	IsDebugEnabled() bool
 }
 
 type dummyEventHandler struct{}
 
-func (h *dummyEventHandler) OnInit(*Session)               {}
-func (h *dummyEventHandler) OnConnect(*Session)            {}
-func (h *dummyEventHandler) IsDebugEnabled() bool          { return false }
-func (h *dummyEventHandler) Error(*Session, error) bool    { return false }
-func (h *dummyEventHandler) Infof(string, ...interface{})  {}
-func (h *dummyEventHandler) Debugf(string, ...interface{}) {}
+func (h *dummyEventHandler) OnInit(*Session)            {}
+func (h *dummyEventHandler) OnConnect(*Session)         {}
+func (h *dummyEventHandler) IsDebugEnabled() bool       { return false }
+func (h *dummyEventHandler) Error(*Session, error) bool { return false }
 
 type errorHandlerWrapper struct {
 	EventHandler

@@ -1,13 +1,3 @@
-# TODO
-
-* don't use `Async` for sync-writes.
-* encryption-multithreading.
-* route messenger-related errors to the messenger's handler.
-* support of fragmented/merged traffic.
-* documentation
-* consider `notewakeup` instead of `Cond.Wait`
-* consider `getg` instead of counter for LockID.
-
 # Quick start
 
 Encrypted `io.WriteReadCloser`, easy:
@@ -20,7 +10,7 @@ identity, err := secureio.NewIdentity(`/home/user/.ssh`)
 remoteIdentity, err := secureio.NewRemoteIdentity(`/home/user/.somedir/remote.pubkey`)
 
 // Create a connection
-conn, _ := net.Dial("udp", "10.0.0.2:1234")
+conn, err := net.Dial("udp", "10.0.0.2:1234")
 
 // Create encrypted connection (exchange keys using ECDH and verify remote side by Curve25519 signature).
 session := identity.NewSession(context.Background(), remoteIdentity, conn, someLogger)
@@ -28,10 +18,10 @@ session := identity.NewSession(context.Background(), remoteIdentity, conn, someL
 // Use it!
 
 // Write to it
-session.Write(someData)
+_, err := session.Write(someData)
 
 // Or/and read from it
-session.Read(someData)
+_, err := session.Read(someData)
 ```
 
 It's also a multiplexer:
@@ -47,7 +37,7 @@ session.SetHandlerFuncs(secureio.MessageType_dataPacketType3, func(payload []byt
 
 sender:
 ```go
-session.WriteMessage(secureio.MessageType_dataPacketType3, payload)
+_, err := session.WriteMessage(secureio.MessageType_dataPacketType3, payload)
 ```
 
 possible message types:
@@ -63,19 +53,29 @@ The `MessageType_dataPacketType0` is used for default `Read()`/`Write()`.
 
 ## Benchmark
 
+The benchmark was performed with communication via an UNIX-socket.
 ```
-goos: linux
-goarch: amd64
-pkg: github.com/xaionaro-go/secureio
-BenchmarkSessionWriteRead1-8                          	    8493	    135936 ns/op	   0.01 MB/s	    2567 B/op	      37 allocs/op
-BenchmarkSessionWriteRead16-8                         	    8838	    134572 ns/op	   0.12 MB/s	    2569 B/op	      37 allocs/op
-BenchmarkSessionWriteRead1024-8                       	    8529	    140228 ns/op	   7.30 MB/s	    2108 B/op	      26 allocs/op
-BenchmarkSessionWriteRead32000-8                      	    3610	    324730 ns/op	  98.54 MB/s	    2188 B/op	      26 allocs/op
-BenchmarkSessionWriteRead64000-8                      	    2336	    511488 ns/op	 125.13 MB/s	    2219 B/op	      26 allocs/op
-BenchmarkSessionWriteMessageAsyncRead1-8              	 2872984	       440 ns/op	   2.27 MB/s	       0 B/op	       0 allocs/op
-BenchmarkSessionWriteMessageAsyncRead16-8             	 2524777	       462 ns/op	  34.64 MB/s	       1 B/op	       0 allocs/op
-BenchmarkSessionWriteMessageAsyncRead1024-8           	  312882	      3614 ns/op	 283.36 MB/s	      36 B/op	       0 allocs/op
-BenchmarkSessionWriteMessageAsyncRead32000-8          	   13692	     87178 ns/op	 367.07 MB/s	    1138 B/op	      16 allocs/op
-BenchmarkSessionWriteMessageAsyncRead64000-8          	    6830	    170860 ns/op	 374.57 MB/s	    2218 B/op	      33 allocs/op
-BenchmarkSessionWriteMessageAsyncRead1300_max1400-8   	   98013	     12267 ns/op	 105.97 MB/s	    1889 B/op	      29 allocs/op
+BenchmarkSessionWriteRead1-8                          	   10000	    117149 ns/op	   0.01 MB/s	     521 B/op	      10 allocs/op
+BenchmarkSessionWriteRead16-8                         	    9865	    118167 ns/op	   0.14 MB/s	     562 B/op	      10 allocs/op
+BenchmarkSessionWriteRead1024-8                       	    9552	    127126 ns/op	   8.06 MB/s	     570 B/op	      10 allocs/op
+BenchmarkSessionWriteRead32000-8                      	    7006	    173781 ns/op	 184.14 MB/s	     512 B/op	      10 allocs/op
+BenchmarkSessionWriteRead64000-8                      	    5010	    294980 ns/op	 216.96 MB/s	     592 B/op	      11 allocs/op
+BenchmarkSessionWriteMessageAsyncRead1-8              	 1975814	       610 ns/op	   1.64 MB/s	       1 B/op	       0 allocs/op
+BenchmarkSessionWriteMessageAsyncRead16-8             	 2049045	       587 ns/op	  27.26 MB/s	       2 B/op	       0 allocs/op
+BenchmarkSessionWriteMessageAsyncRead1024-8           	  418461	      2659 ns/op	 385.07 MB/s	      17 B/op	       0 allocs/op
+BenchmarkSessionWriteMessageAsyncRead32000-8          	   25476	     46798 ns/op	 683.79 MB/s	     210 B/op	       6 allocs/op
+BenchmarkSessionWriteMessageAsyncRead64000-8          	   12976	    109250 ns/op	 585.81 MB/s	     492 B/op	      13 allocs/op
 ```
+More realistic case (if we have MTU ~= 1400):
+```
+BenchmarkSessionWriteMessageAsyncRead1300_max1400-8   	  114258	     10513 ns/op	 123.65 MB/s	     331 B/op	      12 allocs/op
+```
+
+# TODO
+
+* don't use `Async` for sync-writes.
+* route messenger-related errors to the messenger's handler.
+* support of fragmented/merged traffic.
+* documentation
+* consider `notewakeup` instead of `Cond.Wait`
+* consider `getg` instead of counter for LockID.

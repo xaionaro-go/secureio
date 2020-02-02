@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/xaionaro-go/errors"
+	"golang.org/x/crypto/poly1305"
 )
 
 func wrapErrorf(format string, args ...interface{}) error {
@@ -171,20 +172,20 @@ func (err ErrUnencrypted) Error() string {
 }
 
 type ErrInvalidChecksum struct {
-	ExpectedChecksum uint64
-	RealChecksum     uint64
+	ExpectedChecksum [poly1305.TagSize]byte
+	RealChecksum     [poly1305.TagSize]byte
 }
 
-func newErrInvalidChecksum(expectedChecksum, realChecksum uint64) error {
-	err := errors.New(ErrInvalidChecksum{
-		ExpectedChecksum: expectedChecksum,
-		RealChecksum:     realChecksum,
-	})
+func newErrInvalidChecksum(expectedChecksum, realChecksum []byte) error {
+	origErr := ErrInvalidChecksum{}
+	copy(origErr.ExpectedChecksum[:], expectedChecksum)
+	copy(origErr.RealChecksum[:], realChecksum)
+	err := errors.New(origErr)
 	err.Traceback.CutOffFirstNLines += 2
 	return err
 }
 func (err ErrInvalidChecksum) Error() string {
-	return fmt.Sprintf("checksum mismatch: 0x%x != 0x%x",
+	return fmt.Sprintf("checksum mismatch: %x != %x",
 		err.RealChecksum, err.ExpectedChecksum)
 }
 

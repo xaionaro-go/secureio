@@ -3,11 +3,15 @@ package secureio
 import (
 	"crypto/aes"
 	"encoding/binary"
-	"hash"
-	"hash/crc64"
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"github.com/xaionaro-go/slice"
+	"github.com/xaionaro-go/unsafetools"
+	"golang.org/x/crypto/poly1305"
+	"lukechampine.com/blake3"
 )
 
 const (
@@ -15,7 +19,7 @@ const (
 )
 
 const (
-	ivSize = aes.BlockSize
+	ivSize = 8
 )
 
 var (
@@ -30,13 +34,6 @@ func SetMaxPayloadSize(newSize uint32) {
 	newSize &= ^(uint32(aes.BlockSize) - 1)
 	atomic.StoreUint32(&maxPayloadSize, newSize)
 }
-
-var (
-	// NoncePRNG is the PRNG used for NONCE-s which is not required
-	// to be cryptographically strong, but required to do not repeat
-	// as much as possible.
-	NonceRand = newXorShiftPRNG()
-)
 
 type MessageType uint8
 
@@ -138,11 +135,40 @@ func (flags *MessagesContainerFlags) SetIsEncrypted(newValue bool) {
 	}
 }
 
-type messagesContainerHeadersData struct {
-	IV [ivSize]byte // Should be the first. It is used to decrypt other values!
+type Time [ivSize]byte
 
-	ContainerHeadersChecksum uint64
-	MessagesChecksum         uint64
+func (t *Time) Time() time.Time {
+	nanoseconds := binaryOrderType.Uint64(t[:])
+	return time.Unix(0, int64(nanoseconds))
+}
+func (t *Time) String() string {
+	return t.Time().String()
+}
+func (t *Time) Set(v time.Time) {
+	nanoseconds := uint64(v.UnixNano())
+	binaryOrderType.PutUint64((*t)[:], nanoseconds)
+}
+func (t *Time) Read(b []byte) (int, error) {
+	if len(b) < ivSize {
+		return 0, newErrTooShort(ivSize, uint(len(b)))
+	}
+	copy((*t)[:], b)
+	return ivSize, nil
+}
+func (t *Time) Write(b []byte) (int, error) {
+	if len(b) < ivSize {
+		return 0, newErrTooShort(ivSize, uint(len(b)))
+	}
+	copy(b, (*t)[:])
+	return ivSize, nil
+}
+
+type messagesContainerHeadersData struct {
+	Time Time // Should be the first. It is used to decrypt other values!
+
+	ContainerHeadersChecksum [poly1305.TagSize]byte
+	MessagesChecksum         [poly1305.TagSize]byte
+	CreatedAt                uint64
 	Length                   MessageLength
 	MessagesContainerFlags
 	Reserved0 uint8
@@ -209,14 +235,6 @@ func (hdr *messageHeaders) Release() {
 	hdr.pool.Put(hdr)
 }
 
-var (
-	crc64Pool = sync.Pool{
-		New: func() interface{} {
-			return crc64.New(crc64.MakeTable(crc64.ECMA))
-		},
-	}
-)
-
 func (hdr *messageHeadersData) Read(b []byte) (int, error) {
 	if uint(len(b)) < messageHeadersSize {
 		return 0, newErrTooShort(messageHeadersSize, uint(len(b)))
@@ -238,41 +256,33 @@ func (hdr *messageHeadersData) Write(b []byte) (int, error) {
 	return int(messageHeadersSize), nil
 }
 
-func (containerHdr *messagesContainerHeadersData) RandomizeIV() {
-	_, _ = NonceRand.ReadUint64Xorshift(containerHdr.IV[:])
+func (containerHdr *messagesContainerHeadersData) UpdateTime() {
+	containerHdr.Time.Set(time.Now())
 }
 
-func (containerHdr *messagesContainerHeadersData) CalculateChecksum(messagesBytes []byte) error {
-	checksumer := crc64Pool.Get().(hash.Hash64)
-	err := func() (err error) {
-		containerHdr.ContainerHeadersChecksum = 0
-		containerHdr.MessagesChecksum = 0
-		_, err = containerHdr.WriteTo(checksumer)
-		if err != nil {
-			return wrapErrorf("unable to calculate checksum of a header: %w", err)
-		}
+func (containerHdr *messagesContainerHeadersData) calculatePoly1305Key(cipherKey []byte) (result [32]byte) {
+	copy(result[:ivSize], containerHdr.Time[:])
+	copy(result[ivSize:], cipherKey)
+	result = blake3.Sum256(result[:])
+	return result
+}
 
-		containerHdr.ContainerHeadersChecksum = checksumer.Sum64()
+func (containerHdr *messagesContainerHeadersData) CalculateHeadersChecksumTo(cipherKey []byte, dst *[poly1305.TagSize]byte) {
+	key := containerHdr.calculatePoly1305Key(cipherKey)
+	poly1305.Sum(
+		dst,
+		unsafetools.BytesOf(containerHdr)[ivSize+poly1305.TagSize*2:],
+		&key,
+	)
+}
 
-		n, err := checksumer.Write(messagesBytes)
-		if n != len(messagesBytes) && err == nil {
-			err = newErrPartialWrite()
-		}
-		if err != nil {
-			err = wrapErrorf("unable to calculate checksum of a payload: %w", err)
-		}
-
-		containerHdr.MessagesChecksum = checksumer.Sum64()
-		return
-	}()
-	checksumer.Reset()
-	crc64Pool.Put(checksumer)
-
-	if err != nil {
-		return wrapErrorf("unable to calculate checksum: %w", err)
-	}
-
-	return nil
+func (containerHdr *messagesContainerHeadersData) CalculateMessagesChecksumTo(cipherKey []byte, dst *[poly1305.TagSize]byte, messagesBytes []byte) {
+	key := containerHdr.calculatePoly1305Key(cipherKey)
+	poly1305.Sum(
+		dst,
+		messagesBytes,
+		&key,
+	)
 }
 
 func (containerHdr *messagesContainerHeadersData) Read(b []byte) (int, error) {
@@ -280,22 +290,31 @@ func (containerHdr *messagesContainerHeadersData) Read(b []byte) (int, error) {
 		return 0, newErrTooShort(messagesContainerHeadersSize, uint(len(b)))
 	}
 
-	copy(containerHdr.IV[:], b)
+	ivN, err := containerHdr.Time.Read(b)
+	if err != nil {
+		return 0, wrapError(err)
+	}
 
 	n, err := containerHdr.ReadAfterIV(b[ivSize:])
 	if err != nil {
 		return 0, err
 	}
-	return n + ivSize, nil
+	return n + ivN, nil
 }
 
 func (containerHdr *messagesContainerHeadersData) ReadAfterIV(b []byte) (int, error) {
-	containerHdr.ContainerHeadersChecksum = binaryOrderType.Uint64(b)
-	containerHdr.MessagesChecksum = binaryOrderType.Uint64(b[8:])
-	containerHdr.Length = MessageLength(binaryOrderType.Uint32(b[16:]))
-	containerHdr.MessagesContainerFlags = MessagesContainerFlags(b[20])
-	containerHdr.Reserved0 = b[21]
-	containerHdr.Reserved1 = binaryOrderType.Uint16(b[22:])
+	copy(containerHdr.ContainerHeadersChecksum[:], b[:poly1305.TagSize])
+	b = b[poly1305.TagSize:]
+	copy(containerHdr.MessagesChecksum[:], b[:poly1305.TagSize])
+	b = b[poly1305.TagSize:]
+	containerHdr.Length = MessageLength(binaryOrderType.Uint32(b))
+	b = b[4:]
+	containerHdr.MessagesContainerFlags = MessagesContainerFlags(b[0])
+	b = b[1:]
+	containerHdr.Reserved0 = b[0]
+	b = b[1:]
+	containerHdr.Reserved1 = binaryOrderType.Uint16(b)
+	b = b[2:]
 
 	return int(messagesContainerHeadersSize) - ivSize, nil
 }
@@ -305,19 +324,34 @@ func (containerHdr *messagesContainerHeadersData) Write(b []byte) (int, error) {
 		return 0, newErrTooShort(messagesContainerHeadersSize, uint(len(b)))
 	}
 
-	copy(b, containerHdr.IV[:])
-	binaryOrderType.PutUint64(b[16:], uint64(containerHdr.ContainerHeadersChecksum))
-	binaryOrderType.PutUint64(b[24:], uint64(containerHdr.MessagesChecksum))
-	binaryOrderType.PutUint32(b[32:], uint32(containerHdr.Length))
-	b[36] = uint8(containerHdr.MessagesContainerFlags)
-	b[37] = containerHdr.Reserved0
-	binaryOrderType.PutUint16(b[38:], containerHdr.Reserved1)
+	_, err := containerHdr.Time.Write(b)
+	if err != nil {
+		return 0, wrapError(err)
+	}
+	b = b[ivSize:]
+	copy(b, containerHdr.ContainerHeadersChecksum[:])
+	b = b[poly1305.TagSize:]
+	copy(b, containerHdr.MessagesChecksum[:])
+	b = b[poly1305.TagSize:]
+	binaryOrderType.PutUint32(b, uint32(containerHdr.Length))
+	b = b[4:]
+	b[0] = uint8(containerHdr.MessagesContainerFlags)
+	b = b[1:]
+	b[0] = containerHdr.Reserved0
+	b = b[1:]
+	binaryOrderType.PutUint16(b, containerHdr.Reserved1)
+	b = b[2:]
 
 	return int(messagesContainerHeadersSize), nil
 }
 
+var messagesContainerHeadersSizeBufPool = sync.Pool{New: func() interface{} {
+	return make([]byte, messagesContainerHeadersSize)
+}}
+
 func (containerHdr *messagesContainerHeadersData) WriteTo(w io.Writer) (int, error) {
-	buf := make([]byte, messagesContainerHeadersSize)
+	buf := messagesContainerHeadersSizeBufPool.Get().([]byte)
+	defer messagesContainerHeadersSizeBufPool.Put(buf)
 
 	n0, err := containerHdr.Write(buf)
 	if err != nil {
@@ -345,7 +379,6 @@ func newMessagesContainerHeadersPool() *messagesContainerHeadersPool {
 		containerHdr := &messagesContainerHeaders{
 			pool: pool,
 		}
-		containerHdr.RandomizeIV()
 		return containerHdr
 	}
 	return pool
@@ -357,6 +390,7 @@ func (pool *messagesContainerHeadersPool) AcquireMessagesContainerHeaders() *mes
 		panic(`should not happened`)
 	}
 	containerHdr.isBusy = true
+	containerHdr.UpdateTime()
 	return containerHdr
 }
 
@@ -369,24 +403,21 @@ func (pool *messagesContainerHeadersPool) Put(containerHdr *messagesContainerHea
 	pool.storage.Put(containerHdr)
 }
 
-func (containerHdr *messagesContainerHeadersData) Set(isEncrypted bool, messagesBytes []byte) error {
-	containerHdr.SetIsEncrypted(isEncrypted)
+func (containerHdr *messagesContainerHeadersData) Set(cipherKey []byte, messagesBytes []byte) error {
+	containerHdr.SetIsEncrypted(cipherKey != nil)
 	containerHdr.Length = MessageLength(len(messagesBytes))
-	err := containerHdr.CalculateChecksum(messagesBytes)
-	if err != nil {
-		return wrapError(err)
-	}
+	containerHdr.CalculateHeadersChecksumTo(cipherKey, &containerHdr.ContainerHeadersChecksum)
+	containerHdr.CalculateMessagesChecksumTo(cipherKey, &containerHdr.MessagesChecksum, messagesBytes)
 	return nil
 }
 
 func (containerHdr *messagesContainerHeadersData) Reset() {
 	containerHdr.Length = 0
-	containerHdr.ContainerHeadersChecksum = 0
-	containerHdr.MessagesChecksum = 0
+	slice.SetZeros(containerHdr.ContainerHeadersChecksum[:])
+	slice.SetZeros(containerHdr.MessagesChecksum[:])
 	containerHdr.MessagesContainerFlags = 0
 	containerHdr.Reserved0 = 0
 	containerHdr.Reserved1 = 0
-	containerHdr.RandomizeIV()
 }
 
 func (containerHdr *messagesContainerHeaders) Release() {

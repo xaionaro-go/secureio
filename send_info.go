@@ -1,6 +1,7 @@
 package secureio
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,7 @@ type SendInfo struct {
 	N      int
 	SendID uint64 // for debug only
 
+	ctx      context.Context
 	refCount int32
 	isBusy   bool
 	pool     *sendInfoPool
@@ -40,7 +42,7 @@ func newSendInfoPool() *sendInfoPool {
 	return pool
 }
 
-func (pool *sendInfoPool) AcquireSendInfo() *SendInfo {
+func (pool *sendInfoPool) AcquireSendInfo(ctx context.Context) *SendInfo {
 	sendInfo := pool.storage.Get().(*SendInfo)
 	if sendInfo.isBusy {
 		panic(`should not happened`)
@@ -49,6 +51,7 @@ func (pool *sendInfoPool) AcquireSendInfo() *SendInfo {
 	sendInfo.incRefCount()
 	sendInfo.C = make(chan struct{})
 	sendInfo.SendID = atomic.AddUint64(&nextSendID, 1)
+	sendInfo.ctx = ctx
 	return sendInfo
 }
 
@@ -81,4 +84,19 @@ func (sendInfo *SendInfo) Release() {
 			refCount))
 	}
 	sendInfo.pool.Put(sendInfo)
+}
+
+func (sendInfo *SendInfo) String() string {
+	return fmt.Sprintf("{C: %v; Err: %v: N: %v: SendID: %v, refCount: %v, isBusy: %v}",
+		sendInfo.C, sendInfo.Err, sendInfo.N, sendInfo.SendID, atomic.LoadInt32(&sendInfo.refCount), sendInfo.isBusy)
+}
+func (sendInfo *SendInfo) Wait() {
+	<-sendInfo.C
+
+	/*select {
+	case <-sendInfo.C:
+	case <-sendInfo.ctx.Done():
+		sendInfo.N = 0
+		sendInfo.Err = newErrAlreadyClosed()
+	}*/
 }

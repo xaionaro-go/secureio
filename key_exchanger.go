@@ -141,9 +141,7 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 			return
 		}
 		if err = kx.remoteIdentity.VerifySignature(msg.Signature[:], msg.PublicKey[:]); err != nil {
-			if kx.messenger.sess.eventHandler.IsDebugEnabled() {
-				kx.messenger.sess.eventHandler.Debugf("wrong signature: %v", err)
-			}
+			kx.messenger.sess.debugf("wrong signature: %v", err)
 			return
 		}
 		nextLocal := kx.nextLocalPrivateKey
@@ -167,9 +165,7 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 
 func (kx *keyExchanger) Close() error {
 	kx.stop()
-	if kx.messenger.sess.eventHandler.IsDebugEnabled() {
-		kx.messenger.sess.eventHandler.Debugf("key exchanger closed")
-	}
+	kx.messenger.sess.debugf("key exchanger closed")
 	return nil
 }
 
@@ -184,9 +180,7 @@ func (kx *keyExchanger) start() {
 }
 
 func (kx *keyExchanger) iterate() {
-	if kx.messenger.sess.eventHandler.IsDebugEnabled() {
-		kx.messenger.sess.eventHandler.Debugf("kx.iterate()")
-	}
+	kx.messenger.sess.debugf("kx.iterate()")
 
 	var lastExchangeTS time.Time
 	kx.LockDo(func() {
@@ -226,9 +220,7 @@ func (kx *keyExchanger) loop() {
 }
 
 func (kx *keyExchanger) sendPublicKey() error {
-	if kx.messenger.sess.eventHandler.IsDebugEnabled() {
-		kx.messenger.sess.eventHandler.Debugf("kx.sendPublicKey()")
-	}
+	kx.messenger.sess.debugf("kx.sendPublicKey()")
 	msg := &kx.localKeySeedUpdateMessage
 	copy(msg.PublicKey[:], (*kx.nextLocalPublicKey)[:])
 	kx.localIdentity.Sign(msg.Signature[:], msg.PublicKey[:])

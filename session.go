@@ -1,9 +1,8 @@
 package secureio
 
 import (
+	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"errors"
 	"io"
 	"runtime"
@@ -11,6 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 	"unsafe"
+
+	"github.com/aead/chacha20/chacha"
+	"golang.org/x/crypto/poly1305"
 )
 
 const (
@@ -21,7 +23,7 @@ const (
 const (
 	updateKeyEveryNBytes = 1000000
 	messageQueueLength   = 1024
-	cipherBlockSize      = aes.BlockSize
+	cipherBlockSize      = 1 // TODO: remove this obsolete constant
 )
 
 func roundSize(size, blockSize uint32) uint32 {
@@ -47,16 +49,16 @@ type Session struct {
 	options        SessionOptions
 	maxPacketSize  uint32
 
-	keyExchanger      *keyExchanger
-	backend           io.ReadWriteCloser
-	messenger         [MessageTypeMax]*Messenger
-	ReadChan          [MessageTypeMax]chan *ReadItem
-	currentSecret     []byte
-	cipher            *cipher.Block
-	previousCipher    *cipher.Block
-	waitForCipherChan chan struct{}
-	eventHandler      EventHandler
-	stopWaitGroup     sync.WaitGroup
+	keyExchanger         *keyExchanger
+	backend              io.ReadWriteCloser
+	messenger            [MessageTypeMax]*Messenger
+	ReadChan             [MessageTypeMax]chan *ReadItem
+	currentSecret        []byte
+	cipherKey            *[]byte
+	previousCipherKey    *[]byte
+	waitForCipherKeyChan chan struct{}
+	eventHandler         EventHandler
+	stopWaitGroup        sync.WaitGroup
 
 	bufferPool                   *bufferPool
 	sendInfoPool                 *sendInfoPool
@@ -64,28 +66,50 @@ type Session struct {
 	messageHeadersPool           *messageHeadersPool
 	messagesContainerHeadersPool *messagesContainerHeadersPool
 
-	delayedSendInfo       *SendInfo
-	delayedWriteBuf       *Buffer
-	delayedSenderTimer    *time.Timer
-	delayedSenderLocker   sync.Mutex
-	sendDelayedNowChan    chan *SendInfo
-	sendDelayedCond       *sync.Cond
-	sendDelayedCondLocker sync.Mutex
+	delayedSendInfo          *SendInfo
+	delayedWriteBuf          *Buffer
+	delayedSenderTimer       *time.Timer
+	delayedSenderTimerLocker lockerMutex
+	delayedSenderLocker      sync.Mutex
+	sendDelayedNowChan       chan *SendInfo
+	sendDelayedCond          *sync.Cond
+	sendDelayedCondLocker    sync.Mutex
 
 	lastSendInfoSendID uint64
 
 	sentMessagesCount           uint64
 	receivedMessagesCount       uint64
 	sequentialDecryptFailsCount uint64
+
+	delayedSenderLoopCount uint32
+
+	infoOutputChan  chan DebugOutputEntry
+	debugOutputChan chan DebugOutputEntry
+}
+type DebugOutputEntry struct {
+	format string
+	args   []interface{}
 }
 
 type SessionOptions struct {
+	EnableDebug                         bool
 	SendDelay                           *time.Duration
 	DetachOnMessagesCount               uint64
 	DetachOnSequentialDecryptFailsCount uint64
 	ErrorOnSequentialDecryptFailsCount  *uint64
 	KeyExchangerOptions                 KeyExchangerOptions
 	MaxPayloadSize                      uint32
+	OnInitFuncs                         []OnInitFunc
+}
+
+type OnInitFunc func(sess *Session)
+
+func (sess *Session) DebugOutputChan() <-chan DebugOutputEntry {
+	return sess.debugOutputChan
+}
+
+func (sess *Session) InfoOutputChan() <-chan DebugOutputEntry {
+	return sess.infoOutputChan
 }
 
 func (sess *Session) WaitForState(states ...SessionState) SessionState {
@@ -122,20 +146,25 @@ func newSession(
 	}
 
 	sess := &Session{
-		id:                 atomic.AddUint64(&nextSessionID, 1) - 1,
-		identity:           identity,
-		remoteIdentity:     remoteIdentity,
-		state:              SessionState_new,
-		backend:            backend,
-		eventHandler:       eventHandler,
-		waitForCipherChan:  make(chan struct{}),
-		sendDelayedNowChan: make(chan *SendInfo),
-		cipher:             &[]cipher.Block{nil}[0],
-		previousCipher:     &[]cipher.Block{nil}[0],
+		id:                   atomic.AddUint64(&nextSessionID, 1) - 1,
+		identity:             identity,
+		remoteIdentity:       remoteIdentity,
+		state:                SessionState_new,
+		backend:              backend,
+		eventHandler:         eventHandler,
+		waitForCipherKeyChan: make(chan struct{}),
+		sendDelayedNowChan:   make(chan *SendInfo),
+		cipherKey:            &[][]byte{nil}[0],
+		previousCipherKey:    &[][]byte{nil}[0],
 	}
+
+	sess.ctx, sess.cancelFunc = context.WithCancel(ctx)
 	if opts != nil {
 		sess.options = *opts
 	}
+
+	sess.debugOutputChan = make(chan DebugOutputEntry, 1024)
+	sess.infoOutputChan = make(chan DebugOutputEntry, 1024)
 
 	if sess.options.ErrorOnSequentialDecryptFailsCount == nil {
 		sess.options.ErrorOnSequentialDecryptFailsCount =
@@ -164,7 +193,7 @@ func newSession(
 	sess.delayedWriteBuf.Bytes = sess.delayedWriteBuf.Bytes[:0]
 
 	sess.sendInfoPool = newSendInfoPool()
-	sess.delayedSendInfo = sess.sendInfoPool.AcquireSendInfo()
+	sess.delayedSendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 
 	sess.readItemPool = newReadItemPool()
 	sess.messageHeadersPool = newMessageHeadersPool()
@@ -175,10 +204,12 @@ func newSession(
 
 	sess.sendDelayedCond = sync.NewCond(&sess.sendDelayedCondLocker)
 
-	sess.ctx, sess.cancelFunc = context.WithCancel(ctx)
-
 	for i := 0; i < MessageTypeMax; i++ {
 		sess.ReadChan[i] = make(chan *ReadItem, messageQueueLength)
+	}
+
+	for _, onInitFunc := range sess.options.OnInitFuncs {
+		onInitFunc(sess)
 	}
 
 	panicIf(sess.init())
@@ -280,11 +311,18 @@ func (sess *Session) readerLoop() {
 		}
 		for idx, ch := range sess.ReadChan {
 			close(ch)
+			if idx == MessageType_dataPacketType0 {
+				// It is used in read(), so to prevent race-condition
+				// we just preserve it.
+				continue
+			}
 			sess.ReadChan[idx] = nil
 		}
 
 		sess.setState(SessionState_closed)
 		sess.debugf("secureio session closed")
+		close(sess.debugOutputChan)
+		close(sess.infoOutputChan)
 	}()
 
 	var inputBuffer = make([]byte, sess.GetMaxPacketSize())
@@ -292,9 +330,11 @@ func (sess *Session) readerLoop() {
 	decryptedBuffer.Grow(uint(sess.GetMaxPacketSize()))
 
 	for !sess.isDoneFast() {
-		sess.debugf("n, err := sess.backend.Read(inputBuffer)")
+		sess.ifDebug(func() { sess.debugf("n, err := sess.backend.Read(inputBuffer)") })
 		n, err := sess.backend.Read(inputBuffer)
-		sess.debugf("/n, err := sess.backend.Read(inputBuffer): %v | %v | %v", n, err, sess.state.Load())
+		sess.ifDebug(func() {
+			sess.debugf("/n, err := sess.backend.Read(inputBuffer): %v | %v | %v", n, err, sess.state.Load())
+		})
 		if err != nil {
 			if sess.isDoneFast() {
 				return
@@ -315,15 +355,18 @@ func (sess *Session) readerLoop() {
 		}
 
 		containerHdr, messagesBytes, err := sess.decrypt(&decryptedBuffer, inputBuffer[:n])
-		if len(messagesBytes) < 200 {
+		sess.ifDebug(func() {
+			if len(messagesBytes) > 200 {
+				return
+			}
 			sess.debugf("sess.decrypt() result: %v %v %v",
 				containerHdr, messagesBytes, err,
 			)
-		}
+		})
 
 		if err != nil {
 			err = wrapErrorf("unable to decrypt: %w", err)
-			sess.eventHandler.Infof("%v", err)
+			sess.infof("%v", err)
 			sequentialDecryptFailsCount := atomic.AddUint64(&sess.sequentialDecryptFailsCount, 1)
 			if sess.options.ErrorOnSequentialDecryptFailsCount != nil {
 				if sequentialDecryptFailsCount >= *sess.options.ErrorOnSequentialDecryptFailsCount {
@@ -348,9 +391,9 @@ func (sess *Session) processIncomingMessages(
 	messagesBytes []byte,
 ) {
 	msgCount := 0
-	if sess.eventHandler.IsDebugEnabled() {
+	if sess.options.EnableDebug {
 		defer func() {
-			sess.eventHandler.Debugf(`msgCount == %v`, msgCount)
+			sess.debugf(`msgCount == %v`, msgCount)
 		}()
 	}
 
@@ -435,19 +478,27 @@ func (sess *Session) decrypt(
 	containerHdr = sess.messagesContainerHeadersPool.AcquireMessagesContainerHeaders()
 
 	// copying the IV (it's not encrypted)
-	copy(containerHdr.IV[:], encrypted[:ivSize])
+	_, err = containerHdr.Time.Read(encrypted)
+	if err != nil {
+		err = wrapError(err)
+		return
+	}
+
+	// decrypting the rest:
 	encrypted = encrypted[ivSize:]
 
-	tryDecrypt := func(blockCipher cipher.Block) (bool, error) {
+	tryDecrypt := func(cipherKey []byte) (bool, error) {
 		decrypted.Reset()
 		decrypted.Grow(uint(len(encrypted)))
 
-		if blockCipher != nil {
-			decrypt(blockCipher, containerHdr.IV[:], decrypted.Bytes, encrypted)
+		if cipherKey != nil {
+			decrypt(cipherKey, containerHdr.Time[:], decrypted.Bytes, encrypted)
 
 			if len(encrypted) < 200 {
-				sess.debugf("decrypted: iv:%v dec:%v enc:%v dec_len:%v cipher:%v",
-					containerHdr.IV[:], decrypted.Bytes, encrypted, decrypted.Len(), blockCipher)
+				sess.ifDebug(func() {
+					sess.debugf("decrypted: iv:%v dec:%v enc:%v dec_len:%v cipher_key:%v",
+						([ivSize]byte)(containerHdr.Time), decrypted.Bytes, encrypted, decrypted.Len(), cipherKey)
+				})
 			}
 		} else {
 			copy(decrypted.Bytes, encrypted)
@@ -457,29 +508,37 @@ func (sess *Session) decrypt(
 		if n >= 0 {
 			decrypted.Offset += uint(n)
 		}
-		sess.debugf("decrypted headers: err:%v hdr:%+v %v %v %v",
-			err, &containerHdr.messagesContainerHeadersData, decrypted.Len(), decrypted.Cap(), decrypted.Offset)
+		sess.ifDebug(func() {
+			sess.debugf("decrypted headers: err:%v hdr:%+v %v %v %v",
+				err, &containerHdr.messagesContainerHeadersData, decrypted.Len(), decrypted.Cap(), decrypted.Offset)
+		})
 		if err != nil {
 			return false, wrapErrorf("unable to read a decrypted header: %w", err)
 		}
 
-		err = sess.checkChecksum(containerHdr)
+		err = sess.checkHeadersChecksum(cipherKey, containerHdr)
 		if err != nil {
-			sess.debugf("decrypting: checksum did not match (blockCipher == %v): %v",
-				blockCipher, err)
+			sess.debugf("decrypting: headers checksum did not match (cipherKey == %v): %v",
+				cipherKey, err)
 			return false, nil
 		}
 		messagesBytes = decrypted.Bytes[decrypted.Offset:]
+		err = sess.checkMessagesChecksum(cipherKey, containerHdr, messagesBytes)
+		if err != nil {
+			sess.debugf("decrypting: messages checksum did not match (cipherKey == %v): %v",
+				cipherKey, err)
+			return false, wrapError(err)
+		}
 		return true, nil
 	}
 
 	{
 		var done bool
-		for _, cipherInstance := range []cipher.Block{
-			sess.GetCipher(),
-			sess.GetPreviousCipher(),
+		for _, cipherKey := range [][]byte{
+			sess.GetCipherKey(),
+			sess.GetPreviousCipherKey(),
 		} {
-			if done, err = tryDecrypt(cipherInstance); done || err != nil {
+			if done, err = tryDecrypt(cipherKey); done || err != nil {
 				return
 			}
 		}
@@ -493,21 +552,30 @@ func (sess *Session) decrypt(
 	return
 }
 
-func (sess *Session) checkChecksum(containerHdr *messagesContainerHeaders) error {
-	checksum := containerHdr.ContainerHeadersChecksum
-	err := containerHdr.CalculateChecksum(nil)
-	calculatedChecksum := containerHdr.ContainerHeadersChecksum
-	containerHdr.ContainerHeadersChecksum = checksum
+func (sess *Session) checkHeadersChecksum(cipherKey []byte, containerHdr *messagesContainerHeaders) error {
+	var calculatedChecksum [poly1305.TagSize]byte
+	containerHdr.CalculateHeadersChecksumTo(cipherKey, &calculatedChecksum)
 
-	if err != nil {
-		return wrapErrorf("unable to calculate a checksum: %w", err)
+	if bytes.Compare(calculatedChecksum[:], containerHdr.ContainerHeadersChecksum[:]) != 0 {
+		return wrapErrorf(
+			"checkHeadersChecksum: %+v %v: %w",
+			containerHdr.messagesContainerHeadersData, containerHdr.Length,
+			newErrInvalidChecksum(containerHdr.ContainerHeadersChecksum[:], calculatedChecksum[:]),
+		)
 	}
 
-	if calculatedChecksum != checksum {
+	return nil
+}
+
+func (sess *Session) checkMessagesChecksum(cipherKey []byte, containerHdr *messagesContainerHeaders, messagesBytes []byte) error {
+	var calculatedChecksum [poly1305.TagSize]byte
+	containerHdr.CalculateMessagesChecksumTo(cipherKey, &calculatedChecksum, messagesBytes)
+
+	if bytes.Compare(calculatedChecksum[:], containerHdr.MessagesChecksum[:]) != 0 {
 		return wrapErrorf(
-			"checkChecksum: %+v %v: %w",
+			"checkMessagesChecksum: %+v %v: %w",
 			containerHdr.messagesContainerHeadersData, containerHdr.Length,
-			newErrInvalidChecksum(checksum, calculatedChecksum),
+			newErrInvalidChecksum(containerHdr.MessagesChecksum[:], calculatedChecksum[:]),
 		)
 	}
 
@@ -591,7 +659,7 @@ func (sess *Session) WriteMessage(
 ) (int, error) {
 	sendInfo := sess.WriteMessageAsync(msgType, payload)
 
-	<-sendInfo.C
+	sendInfo.Wait()
 	err := sendInfo.Err
 	sendInfo.Release()
 
@@ -601,35 +669,35 @@ func (sess *Session) WriteMessage(
 	return 0, err
 }
 
-func (sess *Session) GetCipher() cipher.Block {
-	return *(*cipher.Block)(
+func (sess *Session) GetCipherKey() []byte {
+	return *(*[]byte)(
 		atomic.LoadPointer(
 			(*unsafe.Pointer)((unsafe.Pointer)(
-				&sess.cipher,
+				&sess.cipherKey,
 			)),
 		),
 	)
 }
 
-func (sess *Session) GetCipherWait() cipher.Block {
-	cipher := sess.GetCipher()
-	if cipher != nil {
-		return cipher
+func (sess *Session) GetCipherKeyWait() []byte {
+	cipherKey := sess.GetCipherKey()
+	if cipherKey != nil {
+		return cipherKey
 	}
 
-	<-sess.waitForCipherChan
-	cipher = sess.GetCipher()
-	if cipher == nil {
+	<-sess.waitForCipherKeyChan
+	cipherKey = sess.GetCipherKey()
+	if cipherKey == nil {
 		panic(`should not happened`)
 	}
-	return cipher
+	return cipherKey
 }
 
-func (sess *Session) GetPreviousCipher() cipher.Block {
-	return *(*cipher.Block)(
+func (sess *Session) GetPreviousCipherKey() []byte {
+	return *(*[]byte)(
 		atomic.LoadPointer(
 			(*unsafe.Pointer)((unsafe.Pointer)(
-				&sess.previousCipher,
+				&sess.previousCipherKey,
 			)),
 		),
 	)
@@ -642,7 +710,7 @@ func (sess *Session) WriteMessageAsync(
 	payload []byte,
 ) (sendInfo *SendInfo) {
 	if uint32(len(payload)) > sess.GetMaxPayloadSize() {
-		sendInfo = sess.sendInfoPool.AcquireSendInfo()
+		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 		sendInfo.Err = newErrPayloadTooBig(uint(sess.GetMaxPayloadSize()), uint(len(payload)))
 		close(sendInfo.C)
 		return
@@ -653,12 +721,12 @@ func (sess *Session) WriteMessageAsync(
 	defer hdr.Release()
 
 	if msgType == MessageType_keyExchange || sess.options.SendDelay == nil {
-		var cipherInstance cipher.Block
+		var cipherKey []byte
 		if msgType != MessageType_keyExchange {
-			cipherInstance = sess.GetCipherWait()
+			cipherKey = sess.GetCipherKeyWait()
 		}
-		n, err := sess.writeMessageSync(cipherInstance, hdr, payload)
-		sendInfo = sess.sendInfoPool.AcquireSendInfo()
+		n, err := sess.writeMessageSync(cipherKey, hdr, payload)
+		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 		sendInfo.N = n
 		sendInfo.Err = err
 		close(sendInfo.C)
@@ -669,7 +737,7 @@ func (sess *Session) WriteMessageAsync(
 }
 
 func (sess *Session) writeMessageSync(
-	cipherInstance cipher.Block,
+	cipherKey []byte,
 	hdr *messageHeaders,
 	payload []byte,
 ) (n int, err error) {
@@ -691,14 +759,14 @@ func (sess *Session) writeMessageSync(
 	copy(buf.Bytes[messageHeadersSize:], payload)
 
 	containerHdr := sess.messagesContainerHeadersPool.AcquireMessagesContainerHeaders()
-	err = containerHdr.Set(cipherInstance != nil, buf.Bytes)
+	err = containerHdr.Set(cipherKey, buf.Bytes)
 	if err != nil {
 		return -1, wrapError(err)
 	}
 	defer containerHdr.Release()
 
 	return sess.sendMessages(
-		cipherInstance,
+		cipherKey,
 		containerHdr,
 		buf.Bytes,
 	)
@@ -708,7 +776,7 @@ func (sess *Session) writeMessageAsync(
 	hdr *messageHeaders,
 	payload []byte,
 ) (sendInfo *SendInfo) {
-	if sess.eventHandler.IsDebugEnabled() {
+	if sess.options.EnableDebug {
 		if len(payload) < 200 {
 			sess.debugf("writeMessageAsync: %+v %v:%v", hdr, len(payload), payload)
 		}
@@ -718,8 +786,8 @@ func (sess *Session) writeMessageAsync(
 	}
 
 	if sess.options.SendDelay == nil {
-		sendInfo = sess.sendInfoPool.AcquireSendInfo()
-		sendInfo.N, sendInfo.Err = sess.writeMessageSync(sess.GetCipherWait(), hdr, payload)
+		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
+		sendInfo.N, sendInfo.Err = sess.writeMessageSync(sess.GetCipherKeyWait(), hdr, payload)
 		close(sendInfo.C)
 		return
 	}
@@ -730,7 +798,7 @@ func (sess *Session) writeMessageAsync(
 			packetSize := messagesContainerHeadersSize + uint(len(buf.Bytes)) + messageHeadersSize + uint(len(payload))
 			if packetSize > uint(sess.GetMaxPacketSize()) {
 				if len(buf.Bytes) == 0 {
-					sendInfo = sess.sendInfoPool.AcquireSendInfo()
+					sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 					sendInfo.Err = newErrPayloadTooBig(uint(sess.GetMaxPacketSize()), packetSize)
 					close(sendInfo.C)
 					return
@@ -754,11 +822,12 @@ func (sess *Session) writeMessageAsync(
 			defer func() {
 				result = recover() == nil
 			}()
+			sendInfo.incRefCount()
 			sess.sendDelayedNowChan <- sendInfo
 			return
 		}() || sess.isDoneFast() {
 			sess.debugf("sess.sendDelayedNowChan is closed :(")
-			sendInfo = sess.sendInfoPool.AcquireSendInfo()
+			sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 			sendInfo.Err = newErrCanceled()
 			close(sendInfo.C)
 			sess.sendDelayedCond.Broadcast()
@@ -842,7 +911,9 @@ func (sess *Session) appendToDelayedWriteBuffer(
 		// No atomicity is required here (with sendInfo) because delayedWriteBuf's Lock handles this problem
 		sendInfo = sess.delayedSendInfo
 		sendInfo.incRefCount()
-		sess.delayedSenderTimer.Reset(*sess.options.SendDelay)
+		sess.delayedSenderTimerLocker.LockDo(func() {
+			sess.delayedSenderTimer.Reset(*sess.options.SendDelay)
+		})
 		atomic.StoreUint64(&sess.lastSendInfoSendID, sendInfo.SendID)
 
 		buf.MetadataVariableUInt++
@@ -855,14 +926,14 @@ func (sess *Session) sendDelayedNow(
 	delayedWriteBufLockID LockID,
 	isSync bool,
 ) uint64 {
-	sess.debugf(`sendDelayedNow(%v, %v)`, delayedWriteBufLockID, isSync)
+	sess.ifDebug(func() { sess.debugf(`sendDelayedNow(%v, %v)`, delayedWriteBufLockID, isSync) })
 
 	// This lines should be before `SetMonopolized` because nothing
 	// should (even very temporary) lock a routine between
 	// `SetMonopolized` and `SwapPointer`. Otherwise function
 	// `delayedWriteBufXLockDo` may work wrong (however it has 1000
 	// tries within, so it's actually safe, but anyway this way is better).
-	newSendInfo := sess.sendInfoPool.AcquireSendInfo()
+	newSendInfo := sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 	nextBuf := sess.bufferPool.AcquireBuffer()
 	nextBuf.Bytes = nextBuf.Bytes[:0]
 
@@ -884,8 +955,10 @@ func (sess *Session) sendDelayedNow(
 		(unsafe.Pointer)(nextBuf)),
 	)
 
-	defer sess.debugf(`/sendDelayedNow(%v, %v): len(buf.Bytes) == %v; oldSendInfo == %v`,
-		delayedWriteBufLockID, isSync, len(buf.Bytes), oldSendInfo)
+	if sess.options.EnableDebug {
+		defer sess.debugf(`/sendDelayedNow(%v, %v): len(buf.Bytes) == %v`,
+			delayedWriteBufLockID, isSync, len(buf.Bytes))
+	}
 
 	callSend := func() {
 		if len(buf.Bytes) > 0 {
@@ -909,17 +982,17 @@ func (sess *Session) sendDelayedNow(
 func (sess *Session) sendDelayedNowSyncFromBuffer(buf *Buffer) (int, error) {
 	messagesBytes := buf.Bytes
 
-	cipherInstance := sess.GetCipherWait()
+	cipherKey := sess.GetCipherKeyWait()
 
 	containerHdr := sess.messagesContainerHeadersPool.AcquireMessagesContainerHeaders()
-	err := containerHdr.Set(cipherInstance != nil, messagesBytes)
+	err := containerHdr.Set(cipherKey, messagesBytes)
 	if err != nil {
 		return -1, wrapError(err)
 	}
 	defer containerHdr.Release()
 
 	n, err := sess.sendMessages(
-		cipherInstance,
+		cipherKey,
 		containerHdr,
 		messagesBytes,
 	)
@@ -937,6 +1010,9 @@ func (sess *Session) incSentMessagesCount(add uint) {
 }
 
 func (sess *Session) startDelayedSender() {
+	if atomic.AddUint32(&sess.delayedSenderLoopCount, 1) != 1 {
+		panic("should not happen")
+	}
 	sess.stopWaitGroup.Add(1)
 	go func() {
 		defer sess.stopWaitGroup.Done()
@@ -952,36 +1028,55 @@ func (sess *Session) delayedSenderLoop() {
 		close(sess.sendDelayedNowChan)
 	}()
 	var lastSendID uint64
-	for {
+	retimer := time.NewTimer(*sess.options.SendDelay)
+	retimer.Stop()
+	for func() bool {
 		select {
 		case sendInfo := <-sess.sendDelayedNowChan:
+			defer sendInfo.Release()
 			sess.debugf("delayedSenderLoop(): sendInfo := <-sess.sendDelayedNowChan: %+v; lastSendID == %v",
 				sendInfo, lastSendID)
 			if sendInfo.SendID == lastSendID {
-				continue
+				return true
 			}
 		case <-sess.ctx.Done():
 			sess.debugf("delayedSenderLoop(): <-sess.ctx.Done()")
-			return
+			return false
 		case <-sess.delayedSenderTimer.C:
+			// TODO: fix this:
+			// There's some race-condition somewhere in the code, so
+			// this timer is mis-fires sometimes and the real message is
+			// never sent. As temporary solution we just add a one more
+			// fire after the same delay :(. This is what is "retimer" for.
+			//
+			// It should be reliable and does not affect performance,
+			// but still it is very ugly...
+			retimer.Stop()
+			retimer.Reset(*sess.options.SendDelay)
 			sess.debugf("delayedSenderLoop(): <-sess.delayedSenderTimer.C")
+		case <-retimer.C:
+			sess.debugf("delayedSenderLoop(): <-retimer.C")
 		}
 
 		sendID := sess.sendDelayedNow(0, true)
 		if atomic.LoadUint64(&sess.lastSendInfoSendID) > sendID {
-			if !sess.delayedSenderTimer.Stop() {
-				<-sess.delayedSenderTimer.C
-			}
-			sess.delayedSenderTimer.Reset(*sess.options.SendDelay)
+			sess.delayedSenderTimerLocker.LockDo(func() {
+				if !sess.delayedSenderTimer.Stop() {
+					<-sess.delayedSenderTimer.C
+				}
+				sess.delayedSenderTimer.Reset(*sess.options.SendDelay)
+			})
 		}
 
 		lastSendID = sendID
 		sess.sendDelayedCond.Broadcast()
+		return true
+	}() {
 	}
 }
 
 func (sess *Session) sendMessages(
-	cipherInstance cipher.Block,
+	cipherKey []byte,
 	containerHdr *messagesContainerHeaders,
 	messagesBytes []byte,
 ) (int, error) {
@@ -1006,8 +1101,10 @@ func (sess *Session) sendMessages(
 		return 0, newErrAlreadyClosed()
 	}
 
-	sess.debugf("containerHdr == %+v; cipherInstance -%v-> nil",
-		&containerHdr.messagesContainerHeadersData, cipherInstance == nil)
+	sess.ifDebug(func() {
+		sess.debugf("containerHdr == %+v; cipherInstance -%v-> nil",
+			&containerHdr.messagesContainerHeadersData, cipherKey == nil)
+	})
 
 	var outBytes []byte
 	if !containerHdr.IsEncrypted() {
@@ -1023,12 +1120,15 @@ func (sess *Session) sendMessages(
 		plainBytes := buf.Bytes[:size]
 
 		encryptedBytes := encrypted.Bytes[:size]
-		encrypt(cipherInstance, containerHdr.IV[:], encryptedBytes[ivSize:], plainBytes[ivSize:])
-		copy(encryptedBytes[:ivSize], containerHdr.IV[:]) // copying the plain IV
-		if len(encryptedBytes) < 200 {
+		encrypt(cipherKey, containerHdr.Time[:], encryptedBytes[ivSize:], plainBytes[ivSize:])
+		copy(encryptedBytes[:ivSize], containerHdr.Time[:]) // copying the plain IV
+		sess.ifDebug(func() {
+			if len(encryptedBytes) >= 200 {
+				return
+			}
 			sess.debugf("iv == %v; encrypted == %v; plain == %v, cipherInstance == %+v",
-				containerHdr.IV[:], encryptedBytes[ivSize:], plainBytes[ivSize:], cipherInstance)
-		}
+				containerHdr.Time[:], encryptedBytes[ivSize:], plainBytes[ivSize:], cipherKey)
+		})
 		outBytes = encryptedBytes
 	}
 
@@ -1046,7 +1146,7 @@ func (sess *Session) sendMessages(
 			tContainerHdr = nil
 		}
 
-		sess.debugf("sess.backend.Write(%v enc_%v:[%+v]) -> %v, %v", outBytesPrint, containerHdr.IsEncrypted(), tContainerHdr, n, err)
+		sess.debugf("sess.backend.Write(%v enc:%v hdr:%+v) -> %v, %v", outBytesPrint, containerHdr.IsEncrypted(), tContainerHdr, n, err)
 	})
 
 	if err != nil {
@@ -1056,7 +1156,7 @@ func (sess *Session) sendMessages(
 }
 
 func (sess *Session) ifDebug(fn func()) {
-	if !sess.eventHandler.IsDebugEnabled() {
+	if !sess.options.EnableDebug {
 		return
 	}
 
@@ -1064,7 +1164,21 @@ func (sess *Session) ifDebug(fn func()) {
 }
 
 func (sess *Session) debugf(format string, args ...interface{}) {
-	sess.ifDebug(func() { sess.eventHandler.Debugf(format, args...) })
+	sess.ifDebug(func() {
+		defer func() { recover() }()
+		select {
+		case sess.debugOutputChan <- DebugOutputEntry{format: format, args: args}:
+		default:
+		}
+	})
+}
+
+func (sess *Session) infof(format string, args ...interface{}) {
+	defer func() { recover() }()
+	select {
+	case sess.infoOutputChan <- DebugOutputEntry{format: format, args: args}:
+	default:
+	}
 }
 
 func (sess *Session) startKeyExchange() {
@@ -1073,6 +1187,7 @@ func (sess *Session) startKeyExchange() {
 		return
 	}
 
+	var keyExchangeCount uint64
 	sess.keyExchanger = newKeyExchanger(
 		sess.ctx,
 		sess.identity,
@@ -1081,6 +1196,11 @@ func (sess *Session) startKeyExchange() {
 			// ok
 			sess.debugf("got key: %v", secret)
 			sess.setSecret(secret)
+
+			if atomic.AddUint64(&keyExchangeCount, 1) != 1 {
+				return
+			}
+
 			sess.setState(SessionState_established,
 				SessionState_closed, SessionState_closing,
 				SessionState_new, SessionState_established)
@@ -1116,22 +1236,22 @@ func (sess *Session) setMessenger(msgType MessageType, messenger *Messenger) {
 
 func (sess *Session) setSecret(newSecret []byte) {
 	sess.LockDo(func() {
-		atomic.SwapPointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.previousCipher)), (unsafe.Pointer)(sess.cipher))
-		key := newSecret[:cipherBlockSize]
-		sess.currentSecret = key
-		cipher, err := aes.NewCipher(key)
-		if err != nil {
-			sess.eventHandler.Error(sess,
-				wrapErrorf(`cannot create an AES cipher instance for key %v: %w`,
-					key, err))
+		atomic.SwapPointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.previousCipherKey)), (unsafe.Pointer)(sess.cipherKey))
+		sess.currentSecret = newSecret
+		newCipherKey := newSecret[:chacha.KeySize]
+		atomic.SwapPointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.cipherKey)), (unsafe.Pointer)(&newCipherKey))
+
+		// check if sess.waitForCipherKeyChan is already closed
+		select {
+		case _, ok := <-sess.waitForCipherKeyChan:
+			if !ok {
+				return
+			}
+		default:
 		}
-		sess.debugf("new cipher with key: %v (err == %v)", key, err)
-		close(sess.waitForCipherChan)
-		if err != nil {
-			_ = sess.Close()
-			return
-		}
-		atomic.SwapPointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.cipher)), (unsafe.Pointer)(&cipher))
+
+		// it not closed, yet? OK, close it:
+		close(sess.waitForCipherKeyChan)
 	})
 }
 

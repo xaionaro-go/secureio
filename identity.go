@@ -206,9 +206,7 @@ func (i *Identity) MutualConfirmationOfIdentity(
 			if errors.As(err, &ErrCannotDecrypt{}) {
 				decryptError = err
 			}
-			if eventHandler.IsDebugEnabled() {
-				eventHandler.Debugf(`closing the backend due to %v`, err)
-			}
+			sess.debugf(`closing the backend due to %v`, err)
 			_ = sess.Close()
 			return false
 		}),

@@ -18,8 +18,15 @@ func TestSessionBigWrite(t *testing.T) {
 
 	identity0, identity1, conn0, conn1 := testPair(t)
 
-	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{"0", t, true, true, nil}, nil)
-	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{"1", t, true, true, nil}, nil)
+	opts := &SessionOptions{
+		OnInitFuncs: []OnInitFunc{func(sess *Session) {
+			readLogsOfSession(t, true, sess)
+		}},
+		EnableDebug: true,
+	}
+
+	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
+	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{t, nil}, opts)
 
 	writeBuf := make([]byte, maxPayloadSize)
 	rand.Read(writeBuf)
@@ -48,8 +55,15 @@ func TestSessionWaitForSendInfo(t *testing.T) {
 
 	identity0, identity1, conn0, conn1 := testPair(t)
 
-	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{"0", t, true, true, nil}, nil)
-	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{"1", t, true, true, nil}, nil)
+	opts := &SessionOptions{
+		OnInitFuncs: []OnInitFunc{func(sess *Session) {
+			readLogsOfSession(t, true, sess)
+		}},
+		EnableDebug: true,
+	}
+
+	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
+	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{t, nil}, opts)
 
 	writeBuf := make([]byte, 8)
 	rand.Read(writeBuf)
@@ -88,35 +102,43 @@ func TestSessionAsyncWrite(t *testing.T) {
 
 	identity0, identity1, conn0, conn1 := testPair(t)
 
-	sendLogger := &testLogger{"0", t, true, true, nil}
-	sess0 := identity0.NewSession(ctx, identity1, conn0, sendLogger, nil)
-	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{"1", t, true, true, nil}, nil)
+	sendLogger := &testLogger{t, nil}
+	opts := &SessionOptions{
+		OnInitFuncs: []OnInitFunc{func(sess *Session) {
+			readLogsOfSession(t, true, sess)
+		}},
+		EnableDebug: true,
+	}
 
-	writeBuf := make([]byte, maxPayloadSize/4)
-	rand.Read(writeBuf)
-	readBuf := make([]byte, maxPayloadSize/4)
+	sess0 := identity0.NewSession(ctx, identity1, conn0, sendLogger, opts)
+	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{t, nil}, opts)
 
 	var wg sync.WaitGroup
 
+	writeBuf := make([]byte, maxPayloadSize/4)
+	rand.Read(writeBuf)
+
 	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			sendInfo := sess0.WriteMessageAsync(MessageType_dataPacketType0, writeBuf)
-			sendLogger.Debugf(`WAITING: sendInfo == %v`, sendInfo)
-			<-sendInfo.C
-			sendLogger.Debugf(`/WAITING: sendInfo == %v`, sendInfo)
-			assert.NoError(t, sendInfo.Err)
-			sendInfo.Release()
-			wg.Done()
-		}()
+		func() {
+			readBuf := make([]byte, maxPayloadSize/4)
 
-		wg.Add(1)
-		go func() {
-			_, err := sess1.Read(readBuf)
-			assert.NoError(t, err)
+			wg.Add(1)
+			go func() {
+				sendInfo := sess0.WriteMessageAsync(MessageType_dataPacketType0, writeBuf)
+				<-sendInfo.C
+				assert.NoError(t, sendInfo.Err)
+				sendInfo.Release()
+				wg.Done()
+			}()
 
-			assert.Equal(t, writeBuf, readBuf)
-			wg.Done()
+			wg.Add(1)
+			go func() {
+				_, err := sess1.Read(readBuf)
+				assert.NoError(t, err)
+
+				assert.Equal(t, writeBuf, readBuf)
+				wg.Done()
+			}()
 		}()
 	}
 
@@ -136,7 +158,7 @@ func TestSession_WriteMessageAsync_noHanging(t *testing.T) {
 	benchmarkSessionWriteRead(
 		&testing.B{N: 10000},
 		1, 0, true, false,
-		&testLogger{"0", t, true, false, nil},
+		&testLogger{t, nil},
 	)
 }
 
@@ -174,7 +196,6 @@ func BenchmarkSessionWriteMessageAsyncRead64000(b *testing.B) {
 func BenchmarkSessionWriteMessageAsyncRead1300_max1400(b *testing.B) {
 	benchmarkSessionWriteRead(b, 1300, 1400, true, false, nil)
 }
-
 
 func benchmarkSessionWriteRead(
 	b *testing.B,
@@ -229,7 +250,6 @@ func benchmarkSessionWriteRead(
 		wg.Wait()
 		b.StopTimer()
 	}()
-
 
 	writeBuf := make([]byte, blockSize)
 	rand.Read(writeBuf)

@@ -1,17 +1,16 @@
 package secureio
 
 import (
-	"crypto/cipher"
-
+	"github.com/aead/chacha20"
 	"github.com/xaionaro-go/slice"
 )
 
-func decrypt(cipherInstance cipher.Block, iv []byte, dst, src []byte) {
-	stream := cipher.NewCTR(cipherInstance, iv)
+func decrypt(key []byte, iv []byte, dst, src []byte) {
 	slice.SetZeros(dst)
-	stream.XORKeyStream(dst, src)
+	chacha20.XORKeyStream(dst, src, iv, key)
 }
 
-func encrypt(cipherInstance cipher.Block, iv []byte, dst, src []byte) {
-	decrypt(cipherInstance, iv, dst, src)
+func encrypt(key []byte, iv []byte, dst, src []byte) {
+	slice.SetZeros(dst)
+	chacha20.XORKeyStream(dst, src, iv, key)
 }
