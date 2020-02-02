@@ -266,10 +266,10 @@ func (containerHdr *messagesContainerHeadersData) UpdatePacketID() {
 func (containerHdr *messagesContainerHeadersData) calculatePoly1305Key(cipherKey []byte) (result [32]byte) {
 	copy(result[:ivSize], containerHdr.PacketID[:])
 	copy(result[ivSize:], cipherKey)
-	result = blake3.Sum256(result[:])
 	for idx := range result {
 		result[idx] ^= poly1305KeyXORer[idx]
 	}
+	result = blake3.Sum256(result[:])
 	return result
 }
 
