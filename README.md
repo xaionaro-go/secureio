@@ -55,20 +55,20 @@ The `MessageType_dataPacketType0` is used for default `Read()`/`Write()`.
 
 The benchmark was performed with communication via an UNIX-socket.
 ```
-BenchmarkSessionWriteRead1-8                          	   10000	    117149 ns/op	   0.01 MB/s	     521 B/op	      10 allocs/op
-BenchmarkSessionWriteRead16-8                         	    9865	    118167 ns/op	   0.14 MB/s	     562 B/op	      10 allocs/op
-BenchmarkSessionWriteRead1024-8                       	    9552	    127126 ns/op	   8.06 MB/s	     570 B/op	      10 allocs/op
-BenchmarkSessionWriteRead32000-8                      	    7006	    173781 ns/op	 184.14 MB/s	     512 B/op	      10 allocs/op
-BenchmarkSessionWriteRead64000-8                      	    5010	    294980 ns/op	 216.96 MB/s	     592 B/op	      11 allocs/op
-BenchmarkSessionWriteMessageAsyncRead1-8              	 1975814	       610 ns/op	   1.64 MB/s	       1 B/op	       0 allocs/op
-BenchmarkSessionWriteMessageAsyncRead16-8             	 2049045	       587 ns/op	  27.26 MB/s	       2 B/op	       0 allocs/op
-BenchmarkSessionWriteMessageAsyncRead1024-8           	  418461	      2659 ns/op	 385.07 MB/s	      17 B/op	       0 allocs/op
-BenchmarkSessionWriteMessageAsyncRead32000-8          	   25476	     46798 ns/op	 683.79 MB/s	     210 B/op	       6 allocs/op
-BenchmarkSessionWriteMessageAsyncRead64000-8          	   12976	    109250 ns/op	 585.81 MB/s	     492 B/op	      13 allocs/op
+BenchmarkSessionWriteRead1-8                          	   10000	    118153 ns/op	   0.01 MB/s	     468 B/op	       8 allocs/op
+BenchmarkSessionWriteRead16-8                         	   10000	    118019 ns/op	   0.14 MB/s	     455 B/op	       8 allocs/op
+BenchmarkSessionWriteRead1024-8                       	    9710	    119238 ns/op	   8.59 MB/s	     441 B/op	       8 allocs/op
+BenchmarkSessionWriteRead32000-8                      	    6980	    173441 ns/op	 184.50 MB/s	     488 B/op	       9 allocs/op
+BenchmarkSessionWriteRead64000-8                      	    3994	    310038 ns/op	 206.43 MB/s	     629 B/op	       9 allocs/op
+BenchmarkSessionWriteMessageAsyncRead1-8              	 2285032	       539 ns/op	   1.86 MB/s	       0 B/op	       0 allocs/op
+BenchmarkSessionWriteMessageAsyncRead16-8             	 2109264	       572 ns/op	  27.99 MB/s	       2 B/op	       0 allocs/op
+BenchmarkSessionWriteMessageAsyncRead1024-8           	  480385	      2404 ns/op	 425.87 MB/s	      15 B/op	       0 allocs/op
+BenchmarkSessionWriteMessageAsyncRead32000-8          	   30163	     39131 ns/op	 817.76 MB/s	     162 B/op	       5 allocs/op
+BenchmarkSessionWriteMessageAsyncRead64000-8          	   15435	     77898 ns/op	 821.59 MB/s	     317 B/op	      10 allocs/op
 ```
 More realistic case (if we have MTU ~= 1400):
 ```
-BenchmarkSessionWriteMessageAsyncRead1300_max1400-8   	  114258	     10513 ns/op	 123.65 MB/s	     331 B/op	      12 allocs/op
+BenchmarkSessionWriteMessageAsyncRead1300_max1400-8   	  117862	     10277 ns/op	 126.49 MB/s	     267 B/op	      10 allocs/op
 ```
 
 # TODO
