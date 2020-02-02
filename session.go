@@ -49,16 +49,17 @@ type Session struct {
 	options        SessionOptions
 	maxPacketSize  uint32
 
-	keyExchanger         *keyExchanger
-	backend              io.ReadWriteCloser
-	messenger            [MessageTypeMax]*Messenger
-	ReadChan             [MessageTypeMax]chan *ReadItem
-	currentSecret        []byte
-	cipherKey            *[]byte
-	previousCipherKey    *[]byte
-	waitForCipherKeyChan chan struct{}
-	eventHandler         EventHandler
-	stopWaitGroup        sync.WaitGroup
+	keyExchanger          *keyExchanger
+	backend               io.ReadWriteCloser
+	messenger             [MessageTypeMax]*Messenger
+	ReadChan              [MessageTypeMax]chan *ReadItem
+	currentSecret         []byte
+	cipherKey             *[]byte
+	previousCipherKey     *[]byte
+	waitForCipherKeyChan  chan struct{}
+	eventHandler          EventHandler
+	stopWaitGroup         sync.WaitGroup
+	lastReceivedTimestamp time.Time
 
 	bufferPool                   *bufferPool
 	sendInfoPool                 *sendInfoPool
@@ -80,11 +81,14 @@ type Session struct {
 	sentMessagesCount           uint64
 	receivedMessagesCount       uint64
 	sequentialDecryptFailsCount uint64
+	unexpectedTimestampCount    uint64
 
 	delayedSenderLoopCount uint32
 
 	infoOutputChan  chan DebugOutputEntry
 	debugOutputChan chan DebugOutputEntry
+
+	pauseLocker sync.Mutex
 }
 type DebugOutputEntry struct {
 	format string
@@ -100,6 +104,15 @@ type SessionOptions struct {
 	KeyExchangerOptions                 KeyExchangerOptions
 	MaxPayloadSize                      uint32
 	OnInitFuncs                         []OnInitFunc
+
+	// AllowReorderingAndDuplication disables checks of
+	// the timestamps (within messages). So even if messages
+	// are in a wrong order they still will be interpreted.
+	//
+	// Warning! It makes the connection more resilient, but allows
+	// hackers to duplicate your messages. Which could be insecure
+	// in some use cases.
+	AllowReorderingAndDuplication bool
 }
 
 type OnInitFunc func(sess *Session)
@@ -280,7 +293,7 @@ func (sess *Session) startBackendCloser() {
 func (sess *Session) isDoneFast() bool {
 	switch sess.state.Load() {
 	case SessionState_new, SessionState_keyExchanging,
-		SessionState_established:
+		SessionState_established, SessionState_paused:
 		return false
 	case sessionState_inTransition:
 		return sess.isDone()
@@ -295,6 +308,55 @@ func (sess *Session) isDone() bool {
 	default:
 		return false
 	}
+}
+
+// SetPause with value `true` temporary disables the reading process
+// from the backend Reader. It does not stop currently running
+// `Read()` from the backend Reader, so it's required to wait
+// for the next message to get the affection.
+// SetPause(true) could be used only from state SessionState_established.
+//
+// SetPause with value `false` re-enables the reading process from
+// the backend Reader. It could be used only from state SessionState_paused.
+//
+// Returns true if the action was successful.
+func (sess *Session) SetPause(newValue bool) (result bool) {
+	sess.debugf("SetPause(%v)", newValue)
+	defer sess.debugf("SetPause(%v) -> %v", newValue, result)
+
+	badStates := []SessionState{
+		SessionState_new,
+		SessionState_closing,
+		SessionState_closed,
+		SessionState_keyExchanging,
+	}
+
+	sess.LockDo(func() {
+		if newValue {
+			if sess.setState(SessionState_paused, badStates...) == SessionState_established {
+				sess.pauseLocker.Lock()
+				result = true
+			}
+		} else {
+			if sess.setState(SessionState_established, badStates...) == SessionState_paused {
+				sess.pauseLocker.Unlock()
+				result = true
+			}
+		}
+	})
+
+	return
+}
+
+func (sess *Session) waitForUnpause() {
+	if sess.GetState() != SessionState_paused {
+		return
+	}
+
+	sess.debugf("blocked readerLoop() by a pause, waiting...")
+	sess.pauseLocker.Lock()
+	sess.pauseLocker.Unlock()
+	sess.debugf("the blocking of readerLoop() by a pause has finished, continuing...")
 }
 
 func (sess *Session) readerLoop() {
@@ -331,6 +393,7 @@ func (sess *Session) readerLoop() {
 
 	for !sess.isDoneFast() {
 		sess.ifDebug(func() { sess.debugf("n, err := sess.backend.Read(inputBuffer)") })
+		sess.waitForUnpause()
 		n, err := sess.backend.Read(inputBuffer)
 		sess.ifDebug(func() {
 			sess.debugf("/n, err := sess.backend.Read(inputBuffer): %v | %v | %v", n, err, sess.state.Load())
@@ -379,6 +442,17 @@ func (sess *Session) readerLoop() {
 			}
 			continue
 		}
+		messageTimestamp := containerHdr.Time.Time()
+		if !sess.options.AllowReorderingAndDuplication &&
+			!messageTimestamp.After(sess.lastReceivedTimestamp) {
+			sess.ifDebug(func() {
+				sess.debugf(`wrong order: %v is not greater than %v`,
+					messageTimestamp.UnixNano(), sess.lastReceivedTimestamp.UnixNano())
+			})
+			atomic.AddUint64(&sess.unexpectedTimestampCount, 1)
+			continue
+		}
+		sess.lastReceivedTimestamp = messageTimestamp
 		atomic.StoreUint64(&sess.sequentialDecryptFailsCount, 0)
 
 		sess.processIncomingMessages(containerHdr, messagesBytes)
@@ -1102,8 +1176,8 @@ func (sess *Session) sendMessages(
 	}
 
 	sess.ifDebug(func() {
-		sess.debugf("containerHdr == %+v; cipherInstance -%v-> nil",
-			&containerHdr.messagesContainerHeadersData, cipherKey == nil)
+		sess.debugf("containerHdr == %+v; cipherKey == %v",
+			&containerHdr.messagesContainerHeadersData, cipherKey)
 	})
 
 	var outBytes []byte
@@ -1126,7 +1200,7 @@ func (sess *Session) sendMessages(
 			if len(encryptedBytes) >= 200 {
 				return
 			}
-			sess.debugf("iv == %v; encrypted == %v; plain == %v, cipherInstance == %+v",
+			sess.debugf("iv == %v; encrypted == %v; plain == %v, cipherKey == %+v",
 				containerHdr.Time[:], encryptedBytes[ivSize:], plainBytes[ivSize:], cipherKey)
 		})
 		outBytes = encryptedBytes
@@ -1146,7 +1220,7 @@ func (sess *Session) sendMessages(
 			tContainerHdr = nil
 		}
 
-		sess.debugf("sess.backend.Write(%v enc:%v hdr:%+v) -> %v, %v", outBytesPrint, containerHdr.IsEncrypted(), tContainerHdr, n, err)
+		sess.debugf("sess.backend.Write(%v enc:%v[parsed_hdr:%+v]) -> %v, %v", outBytesPrint, containerHdr.IsEncrypted(), tContainerHdr, n, err)
 	})
 
 	if err != nil {

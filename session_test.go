@@ -7,10 +7,12 @@ import (
 	"io"
 	"math/rand"
 	"os"
+	"runtime"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/xaionaro-go/slice"
 )
 
 func TestSessionBigWrite(t *testing.T) {
@@ -341,4 +343,133 @@ func benchmarkSessionWriteRead(
 		panic(`should not happened`)
 	default:
 	}
+}
+
+func TestHackerDuplicateMessage(t *testing.T) {
+	ctx := context.Background()
+
+	identity0, identity1, conn0, conn1 := testPair(t)
+
+	opts := &SessionOptions{
+		OnInitFuncs: []OnInitFunc{func(sess *Session) {
+			readLogsOfSession(t, true, sess)
+		}},
+		EnableDebug: true,
+	}
+
+	// No hacker, yet
+
+	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
+	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{t, nil}, opts)
+
+	writeBuf := make([]byte, maxPayloadSize)
+	rand.Read(writeBuf)
+	readBuf := make([]byte, maxPayloadSize)
+
+	// Now a hacker appears, listens a message in the middle a repeats it.
+	// A secureio client should ignore the duplicate
+
+	// Intercepting a message
+
+	// sess1.SetPause(true) will temporary pause sess1 _after_ receiving
+	// the next message.
+	sess1.WaitForState(SessionState_established)
+	assert.True(t, sess1.SetPause(true))
+
+	// The next message:
+	_, err := sess0.Write(writeBuf)
+	assert.NoError(t, err)
+
+	_, err = sess1.Read(readBuf)
+	assert.NoError(t, err)
+
+	assert.Equal(t, writeBuf, readBuf)
+	rand.Read(writeBuf)
+
+	// Now sess1 is paused (does not listen for traffic
+	// and now we can intercept it), so sending a message:
+	_, err = sess0.Write(writeBuf)
+	assert.NoError(t, err)
+
+	// And intercepting it:
+	interceptedMessage := make([]byte, sess1.GetMaxPacketSize()+1)
+	n, err := conn1.Read(interceptedMessage)
+	assert.Less(t, n, int(sess1.GetMaxPacketSize())+1)
+	assert.NoError(t, err)
+
+	// Unpausing and resending the message to pretend like we
+	// weren't here:
+	assert.True(t, sess1.SetPause(false))
+	_, err = conn0.Write(interceptedMessage)
+	assert.NoError(t, err)
+
+	_, err = sess1.Read(readBuf)
+	assert.NoError(t, err)
+
+	assert.Equal(t, writeBuf, readBuf)
+
+	// And now repeating the message (making a duplicate).
+	// This message should be ignored by "sess1" (if everything
+	// works correctly and option AllowReorderingAndDuplication
+	// is off):
+	_, err = conn0.Write(interceptedMessage)
+	assert.NoError(t, err)
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		slice.SetZeros(readBuf)
+		_, err = sess1.Read(readBuf)
+		assert.NoError(t, err)
+
+		if !assert.Equal(t, uint64(1), sess1.unexpectedTimestampCount) {
+			// Unblocking the goroutine below (with `runtime.Gosched()`)
+			// if required.
+			sess1.unexpectedTimestampCount = 1
+		}
+	}()
+
+	successfullyIgnoredTheDuplicate := false
+	assert.Equal(t, uint64(0), sess1.unexpectedTimestampCount)
+	go func() {
+		for sess1.unexpectedTimestampCount == 0 {
+			runtime.Gosched()
+		}
+		successfullyIgnoredTheDuplicate = true
+
+		// Just sending some message to unblock a goroutine above
+		// (with `sess1.Read()`).
+		_, err := sess0.Write([]byte{})
+		assert.NoError(t, err)
+	}()
+
+	wg.Wait()
+	assert.True(t, successfullyIgnoredTheDuplicate)
+
+	// Disabling the defensive mechanism and trying again,
+	// now we should receive the duplicate:
+	sess1.options.AllowReorderingAndDuplication = true
+
+	_, err = conn0.Write(interceptedMessage)
+	assert.NoError(t, err)
+
+	slice.SetZeros(readBuf)
+	_, err = sess1.Read(readBuf)
+	assert.NoError(t, err)
+
+	assert.Equal(t, writeBuf, readBuf)
+
+	// The test is passed, closing...
+
+	assert.NoError(t, sess0.Close())
+	assert.NoError(t, sess1.Close())
+
+	sess0.WaitForClosure()
+	sess1.WaitForClosure()
+
+	assert.True(t, sess0.isDone())
+	assert.True(t, sess1.isDone())
 }

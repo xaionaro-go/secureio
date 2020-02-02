@@ -13,6 +13,7 @@ const (
 	SessionState_closed
 	SessionState_keyExchanging
 	SessionState_established
+	SessionState_paused
 	SessionState_closing
 	sessionState_inTransition
 )
@@ -27,6 +28,8 @@ func (state SessionState) String() string {
 		return `key_exchanging`
 	case SessionState_established:
 		return `established`
+	case SessionState_paused:
+		return `paused`
 	case SessionState_closing:
 		return `closing`
 	case sessionState_inTransition:
