@@ -73,6 +73,35 @@ More realistic case (if we have MTU ~= 1400):
 BenchmarkSessionWriteMessageAsyncRead1300_max1400-8   	  117862	     10277 ns/op	 126.49 MB/s	     267 B/op	      10 allocs/op
 ```
 
+# Security design
+
+### Key exchange
+
+Key exchange is performed via ED25519. [If a PSK is set, then
+the PSK is concatenated with a constant salt-value, hashed with
+`sha3.Sum256`. And this value is XOR-ed with the key received
+via ED25519](https://github.com/xaionaro-go/secureio/blob/204abe072dc52087495008f1f1d8c4903558229d/key_exchanger.go#L111). The resulting value is used a PSK for ChaCha20 encryption.
+This key is called `cipherKey` within the code.
+
+The key received via ED25510 is updated [every minute](https://github.com/xaionaro-go/secureio/blob/204abe072dc52087495008f1f1d8c4903558229d/key_exchanger.go#L18).
+So in turn the `cipherKey` is updated every minute as well.
+
+### Encryption
+
+Each packet starts with an unique (for a session) non-encrypted
+`PacketID`. The `PacketID` is used as IV/NONCE for ChaCha20 and
+`cipherKey` is used as the key.
+
+### Message authentication 
+
+Message authentication is done using Poly1305. As key for Poly1305
+used a blake3.Sum256 hash of:
+ - [concatenation of `PacketID` and `cipherKey` XOR-ed](https://github.com/xaionaro-go/secureio/blob/204abe072dc52087495008f1f1d8c4903558229d/message.go#L267) by a [constant value](https://github.com/xaionaro-go/secureio/blob/204abe072dc52087495008f1f1d8c4903558229d/message.go#L40).
+
+`PacketID` is allowed to grow only. If it was received a packet
+with the same `PacketID` (as before) or with a lesser `PackerID` then the packet
+is just ignored.
+
 # TODO
 
 * don't use `Async` for sync-writes.
