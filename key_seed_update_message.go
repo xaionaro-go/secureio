@@ -6,7 +6,7 @@ import (
 
 type keySeedUpdateMessage struct {
 	PublicKey [PublicKeySize]byte
-	Signature [KeySignatureSize]byte
+	Signature [keySignatureSize]byte
 }
 
 var (

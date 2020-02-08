@@ -9,7 +9,7 @@ Encrypted `io.WriteReadCloser`, easy:
 identity, err := secureio.NewIdentity(`/home/user/.ssh`)
 
 // Read remote identity 
-remoteIdentity, err := secureio.NewRemoteIdentity(`/home/user/.somedir/remote.pubkey`)
+remoteIdentity, err := secureio.NewRemoteIdentityFromPublicKey(`/home/user/.somedir/remote.pubkey`)
 
 // Create a connection
 conn, err := net.Dial("udp", "10.0.0.2:1234")
@@ -26,32 +26,57 @@ _, err := session.Write(someData)
 _, err := session.Read(someData)
 ```
 
-It's also a multiplexer:
+## It's also a multiplexer
 
-receiver:
+#### Receive
+
+Setup the receiver:
 ```go
-session.SetHandlerFuncs(secureio.MessageType_dataPacketType3, func(payload []byte) {
+session.SetHandlerFuncs(secureio.MessageTypeDataPacketType3, func(payload []byte) {
     fmt.Println("I received a payload:", payload)
 }, func(err error) {
     panic(err)
 })
 ```
 
-sender:
+#### Send
+
+Send a message synchronously:
 ```go
-_, err := session.WriteMessage(secureio.MessageType_dataPacketType3, payload)
+_, err := session.WriteMessage(secureio.MessageTypeDataPacketType3, payload)
 ```
 
-possible message types:
+**OR**
+
+Send a message asynchronously:
 ```go
-MessageType_dataPacketType0
-MessageType_dataPacketType1
-MessageType_dataPacketType2
-MessageType_dataPacketType3
-...
-MessageType_dataPacketType15
+// Schedule the sending of the payload
+sendInfo := session.WriteMessageAsync(secureio.MessageTypeDataPacketType3, payload)
+
+[.. your another stuff here if you want ..]
+
+// Wait until the real sending
+<-sendInfo.Done()
+
+// It's not necessary, but helps to reduce the pressure on GC (so to optimize CPU and RAM utilization)
+sendInfo.Release()
+
+// Here you get the error if any:
+err := sendInfo.Err
 ```
-The `MessageType_dataPacketType0` is used for default `Read()`/`Write()`.
+
+#### MessageTypes
+
+```go
+MessageTypeDataPacketType0
+MessageTypeDataPacketType1
+MessageTypeDataPacketType2
+MessageTypeDataPacketType3
+...
+MessageTypeDataPacketType15
+```
+The `MessageTypeDataPacketType0` is used for default `Read()`/`Write()`.
+Use any :)
 
 ## Benchmark
 
@@ -68,7 +93,18 @@ BenchmarkSessionWriteMessageAsyncRead1024-8           	  480385	      2404 ns/op
 BenchmarkSessionWriteMessageAsyncRead32000-8          	   30163	     39131 ns/op	 817.76 MB/s	     162 B/op	       5 allocs/op
 BenchmarkSessionWriteMessageAsyncRead64000-8          	   15435	     77898 ns/op	 821.59 MB/s	     317 B/op	      10 allocs/op
 ```
-More realistic case (if we have MTU ~= 1400):
+
+As you can see, if you need a high throughput then you need to use
+`WriteMessageAsync`. This package is designed to be asynchronous, so
+basically `Write` is an stupid and slow wrapper around code of
+`WriteMessageAsync`. And if you use `WriteMessageAsync` it also
+merges all your messages collected in 50 microseconds into a one,
+sends, and then splits them back. It allows to reduce amount of syscalls
+and other overheads. So to achieve like 1.86MiB/s on 1-byte messages
+you need to send a lot of them asynchronously (from each other), so they
+will be merged while sending/receiving through the backend connection.
+
+Also this 800MiB/s is more about the localhost-case. And more realistic network case (if we have MTU ~= 1400) is:
 ```
 BenchmarkSessionWriteMessageAsyncRead1300_max1400-8   	  117862	     10277 ns/op	 126.49 MB/s	     267 B/op	      10 allocs/op
 ```

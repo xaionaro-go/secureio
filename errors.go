@@ -40,6 +40,11 @@ func wrapError(err error) error {
 	return wrappedErr
 }
 
+// ErrCannotDecrypt is an error indicates it was unable to
+// decrypt a message. So all three attempts failed:
+// * Try to decrypt using current cipher key.
+// * Try to decrypt using previous cipher key.
+// * Try to interpret it as already a non-encrypted message.
 type ErrCannotDecrypt struct{}
 
 func newErrCannotDecrypt() error {
@@ -51,6 +56,8 @@ func (err ErrCannotDecrypt) Error() string {
 	return "cannot decrypt"
 }
 
+// ErrPartialWrite is an error indicates if a Write() call returned "n"
+// less than expected. Could be a connection-related problem.
 type ErrPartialWrite struct{}
 
 func newErrPartialWrite() error {
@@ -62,6 +69,9 @@ func (err ErrPartialWrite) Error() string {
 	return "partial write"
 }
 
+// ErrInvalidSignature is an error indicates if the remote side have
+// sent a signature which fails to be verified by the known
+// public key (of the remote side).
 type ErrInvalidSignature struct{}
 
 func newErrInvalidSignature() error {
@@ -92,6 +102,8 @@ var (
 
 */
 
+// ErrWrongKeyLength is an error indicates when a crypto key is of a wrong size.
+// For example ED25519 key is expected to be 256 bits (no more, no less).
 type ErrWrongKeyLength struct {
 	ExpectedLength uint
 	RealLength     uint
@@ -108,6 +120,8 @@ func (err ErrWrongKeyLength) Error() string {
 		err.RealLength, err.ExpectedLength)
 }
 
+// ErrCannotLoadKeys is an error indicates if it was unable to read or/and parse
+// crypto keys.
 type ErrCannotLoadKeys struct {
 	OriginalError error
 }
@@ -121,6 +135,9 @@ func (err ErrCannotLoadKeys) Error() string {
 	return "cannot load keys"
 }
 
+// ErrAlreadyClosed is an error indicates there was an attempt
+// to use a resource which is already marked as closed.
+// For example, it could mean a try to use a closed session or connection.
 type ErrAlreadyClosed struct{}
 
 func newErrAlreadyClosed() error {
@@ -132,6 +149,9 @@ func (err ErrAlreadyClosed) Error() string {
 	return "already closed"
 }
 
+// ErrKeyExchangeTimeout is an error indicates that there was no
+// successful key exchange too long. So this session does not work properly
+// or/and cannot be trusted and therefore considered erroneous.
 type ErrKeyExchangeTimeout struct{}
 
 func newErrKeyExchangeTimeout() error {
@@ -143,6 +163,11 @@ func (err ErrKeyExchangeTimeout) Error() string {
 	return "key exchange timeout"
 }
 
+// ErrTooShort is an error used when it was unable to parse something
+// because the data (in the binary representation) is too short.
+// For example if there was received only one byte while it
+// was expecting for message headers (which are a structure of a static
+// size larger than one byte).
 type ErrTooShort struct {
 	ExpectedLength uint
 	RealLength     uint
@@ -160,6 +185,8 @@ func (err ErrTooShort) Error() string {
 	return "too short"
 }
 
+// ErrUnencrypted is an error indicates that the parsed message was
+// not encrypted.
 type ErrUnencrypted struct{}
 
 func newErrUnencrypted() error {
@@ -171,6 +198,9 @@ func (err ErrUnencrypted) Error() string {
 	return "not encrypted"
 }
 
+// ErrInvalidChecksum is an error indicates if decrypted checksum does
+// not match checksum of the decrypted data with any
+// currently available cipher key.
 type ErrInvalidChecksum struct {
 	ExpectedChecksum [poly1305.TagSize]byte
 	RealChecksum     [poly1305.TagSize]byte
@@ -189,6 +219,9 @@ func (err ErrInvalidChecksum) Error() string {
 		err.RealChecksum, err.ExpectedChecksum)
 }
 
+// ErrPayloadTooBig means there was an attempt to use more buffer
+// space than it was reserved. The size of a message should not
+// exceed (*Session).GetMaxPayloadSize() bytes.
 type ErrPayloadTooBig struct {
 	MaxSize  uint
 	RealSize uint
@@ -203,17 +236,23 @@ func (err ErrPayloadTooBig) Error() string {
 	return fmt.Sprintf("the payload is too big (%v > %v)", err.RealSize, err.MaxSize)
 }
 
-type ErrMonopolized struct{}
+// errMonopolized is an error means that there was an attempt to lock a buffer
+// which is already locked by an exclusive locking. This cases are
+// handled just by retries.
+type errMonopolized struct{}
 
 func newErrMonopolized() error {
-	err := errors.New(ErrMonopolized{})
+	err := errors.New(errMonopolized{})
 	err.Traceback.CutOffFirstNLines += 2
 	return err
 }
-func (err ErrMonopolized) Error() string {
+func (err errMonopolized) Error() string {
 	return fmt.Sprintf("the payload is too big")
 }
 
+// ErrCanceled is an error indicates that the action was canceled. It
+// happens when there're active async-requests while session is
+// already closing.
 type ErrCanceled struct{}
 
 func newErrCanceled() error {

@@ -1,4 +1,4 @@
-package secureio
+package secureio_test
 
 import (
 	"context"
@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	. "github.com/xaionaro-go/secureio"
 )
 
 func TestIdentityMutualConfirmationOfIdentityWithPSK(t *testing.T) {
@@ -30,7 +32,7 @@ func TestIdentityMutualConfirmationOfIdentityWithPSK(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err0, key0 = identity0.MutualConfirmationOfIdentity(
+		key0, err0 = identity0.MutualConfirmationOfIdentity(
 			ctx,
 			identity1,
 			conn0,
@@ -44,7 +46,7 @@ func TestIdentityMutualConfirmationOfIdentityWithPSK(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err1, key1 = identity1.MutualConfirmationOfIdentity(
+		key1, err1 = identity1.MutualConfirmationOfIdentity(
 			ctx,
 			identity0,
 			conn1,
@@ -90,7 +92,7 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err0, key0 = identity0.MutualConfirmationOfIdentity(
+		key0, err0 = identity0.MutualConfirmationOfIdentity(
 			ctx,
 			identity1,
 			conn0,
@@ -105,7 +107,7 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err1, key1 = identity1.MutualConfirmationOfIdentity(
+		key1, err1 = identity1.MutualConfirmationOfIdentity(
 			ctx,
 			identity0,
 			conn1,

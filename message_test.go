@@ -13,7 +13,7 @@ func TestMessagesContainerHeadersData_WriteRead(t *testing.T) {
 	hdr.Length = (^0) / 3
 	copy(hdr.ContainerHeadersChecksum[:], []byte{17, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15})
 	copy(hdr.MessagesChecksum[:], []byte{5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15})
-	hdr.MessagesContainerFlags = (^0) / 7
+	hdr.messagesContainerFlags = (^0) / 7
 	hdr.Reserved0 = (^0) / 11
 	hdr.Reserved1 = (^0) / 13
 

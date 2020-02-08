@@ -10,9 +10,9 @@ var (
 	nextLockID uint64
 )
 
-type LockID uint64
+type lockID uint64
 
-type Buffer struct {
+type buffer struct {
 	pool          *bufferPool
 	locker        sync.RWMutex
 	isMonopolized uint32
@@ -26,12 +26,12 @@ type Buffer struct {
 	MetadataVariableUInt uint
 }
 
-func (buf *Buffer) IsMonopolized() bool {
+func (buf *buffer) IsMonopolized() bool {
 	return atomic.LoadUint32(&buf.isMonopolized) != 0
 }
 
-func (buf *Buffer) SetMonopolized(prevLockID LockID, isMonopolized bool) error {
-	return buf.lockDo(prevLockID, func(LockID) {
+func (buf *buffer) SetMonopolized(prevLockID lockID, isMonopolized bool) error {
+	return buf.lockDo(prevLockID, func(lockID) {
 		if isMonopolized {
 			atomic.StoreUint32(&buf.isMonopolized, 1)
 		} else {
@@ -40,13 +40,13 @@ func (buf *Buffer) SetMonopolized(prevLockID LockID, isMonopolized bool) error {
 	}, !isMonopolized)
 }
 
-func (buf *Buffer) LockDo(prevLockID LockID, fn func(LockID)) error {
+func (buf *buffer) LockDo(prevLockID lockID, fn func(lockID)) error {
 	return buf.lockDo(prevLockID, fn, false)
 }
 
-func (buf *Buffer) lockDo(prevLockID LockID, fn func(LockID), ignoreIsMonopolized bool) error {
-	var lockIDValue LockID
-	if prevLockID != 0 && LockID(atomic.LoadUint64(&buf.lockID)) == prevLockID {
+func (buf *buffer) lockDo(prevLockID lockID, fn func(lockID), ignoreIsMonopolized bool) error {
+	var lockIDValue lockID
+	if prevLockID != 0 && lockID(atomic.LoadUint64(&buf.lockID)) == prevLockID {
 		lockIDValue = prevLockID
 	} else {
 		buf.locker.Lock()
@@ -54,7 +54,7 @@ func (buf *Buffer) lockDo(prevLockID LockID, fn func(LockID), ignoreIsMonopolize
 			atomic.StoreUint64(&buf.lockID, 0)
 			buf.locker.Unlock()
 		}()
-		lockIDValue = LockID(atomic.AddUint64(&nextLockID, 1))
+		lockIDValue = lockID(atomic.AddUint64(&nextLockID, 1))
 		atomic.StoreUint64(&buf.lockID, uint64(lockIDValue))
 	}
 
@@ -68,33 +68,33 @@ func (buf *Buffer) lockDo(prevLockID LockID, fn func(LockID), ignoreIsMonopolize
 	if len(buf.Bytes) > maxPossiblePacketSize {
 		panic(fmt.Sprintf(`should not happened: %v > %v`, len(buf.Bytes), maxPossiblePacketSize))
 	}
-	fn(LockID(lockIDValue))
+	fn(lockID(lockIDValue))
 	if len(buf.Bytes) > maxPossiblePacketSize {
 		panic(fmt.Sprintf(`should not happened: %v > %v`, len(buf.Bytes), maxPossiblePacketSize))
 	}
 	return nil
 }
 
-func (buf *Buffer) RLockDo(fn func()) error {
+func (buf *buffer) RLockDo(fn func()) error {
 	buf.locker.RLock()
 	defer buf.locker.RUnlock()
 	fn()
 	return nil
 }
 
-func (buf *Buffer) Read(b []byte) (int, error) {
+func (buf *buffer) Read(b []byte) (int, error) {
 	copy(b, buf.Bytes[buf.Offset:])
 	buf.Offset += uint(len(b))
 	return len(b), nil
 }
 
-func (buf *Buffer) Reset() {
+func (buf *buffer) Reset() {
 	buf.Offset = 0
 	buf.Bytes = buf.Bytes[:0]
 	buf.MetadataVariableUInt = 0
 }
 
-func (buf *Buffer) Grow(size uint) {
+func (buf *buffer) Grow(size uint) {
 	if uint(cap(buf.Bytes)) < size {
 		buf.Bytes = make([]byte, size)
 		return
@@ -103,11 +103,11 @@ func (buf *Buffer) Grow(size uint) {
 	buf.Bytes = buf.Bytes[:size]
 }
 
-func (buf *Buffer) Len() uint {
+func (buf *buffer) Len() uint {
 	return uint(len(buf.Bytes)) - buf.Offset
 }
 
-func (buf *Buffer) Cap() uint {
+func (buf *buffer) Cap() uint {
 	return uint(cap(buf.Bytes))
 }
 
@@ -120,7 +120,7 @@ func newBufferPool(maxSize uint) *bufferPool {
 		storage: sync.Pool{},
 	}
 	pool.storage.New = func() interface{} {
-		buf := &Buffer{
+		buf := &buffer{
 			pool: pool,
 		}
 		buf.Grow(maxSize)
@@ -129,8 +129,8 @@ func newBufferPool(maxSize uint) *bufferPool {
 	return pool
 }
 
-func (pool *bufferPool) AcquireBuffer() *Buffer {
-	buf := pool.storage.Get().(*Buffer)
+func (pool *bufferPool) AcquireBuffer() *buffer {
+	buf := pool.storage.Get().(*buffer)
 	if buf.isBusy {
 		panic(`should not happened`)
 	}
@@ -140,7 +140,7 @@ func (pool *bufferPool) AcquireBuffer() *Buffer {
 	return buf
 }
 
-func (buf *Buffer) incRefCount() bool {
+func (buf *buffer) incRefCount() bool {
 	if atomic.AddInt32(&buf.refCount, 1) == 1 {
 		// this item was already fully released, we cannot reuse it :(
 		atomic.AddInt32(&buf.refCount, -1)
@@ -149,7 +149,7 @@ func (buf *Buffer) incRefCount() bool {
 	return true
 }
 
-func (buf *Buffer) Release() {
+func (buf *buffer) Release() {
 	refCount := atomic.AddInt32(&buf.refCount, -1)
 	if refCount > 0 {
 		return

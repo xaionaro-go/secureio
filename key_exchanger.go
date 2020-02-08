@@ -9,20 +9,33 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wsddn/go-ecdh"
+	"github.com/aead/ecdh"
 	"golang.org/x/crypto/ed25519"
 	"golang.org/x/crypto/sha3"
 )
 
 const (
+	// DefaultKeyExchangeInterval defines how ofter the cipher key is renewed.
 	DefaultKeyExchangeInterval = time.Minute
-	DefaultKeyExchangeTimeout  = time.Minute
+
+	// DefaultKeyExchangeTimeout defines how long it will wait (after sending
+	// the request) for a response to request to exchange keys before
+	// consider the situation erroneous.
+	DefaultKeyExchangeTimeout = time.Minute
 )
 
 const (
-	PublicKeySize    = ed25519.PublicKeySize
-	PrivateKeySize   = ed25519.PublicKeySize
-	KeySignatureSize = ed25519.SignatureSize
+	// PublicKeySize the size of a identity public key in bytes.
+	PublicKeySize = ed25519.PublicKeySize
+
+	// PrivateKeySize the size of a identity private key in bytes
+	PrivateKeySize = ed25519.PrivateKeySize
+
+	// keySignatureSize the size of signature of a public key in bytes
+	keySignatureSize = ed25519.SignatureSize
+
+	curve25519PrivateKeySize = 32
+	curve25519PublicKeySize  = 32
 )
 
 var (
@@ -44,20 +57,42 @@ type keyExchanger struct {
 
 	failCount                  uint
 	lastExchangeTS             time.Time
-	nextLocalPrivateKey        *[PrivateKeySize]byte
-	nextLocalPublicKey         *[PublicKeySize]byte
+	nextLocalKeyLocker         lockerRWMutex
+	nextLocalPrivateKey        *[curve25519PrivateKeySize]byte
+	nextLocalPublicKey         *[curve25519PublicKeySize]byte
 	remoteKeySeedUpdateMessage keySeedUpdateMessage
 	localKeySeedUpdateMessage  keySeedUpdateMessage
 	localIdentity              *Identity
 	remoteIdentity             *Identity
 	messenger                  *Messenger
-	ecdh                       ecdh.ECDH
+	ecdh                       ecdh.KeyExchange
 }
 
+// KeyExchangerOptions is used to configure the key exchanging options.
+// It's passed to a session via SessionOptions.
 type KeyExchangerOptions struct {
+	// Interval defines delay between generating a new cipher key.
+	//
+	// Generating a key is an expensive operation. Moreover
+	// secureio remembers only the current key and the previous one. So
+	// if you generate keys with interval less than required for stable
+	// round-trip between peers, then the session will be very unstable.
+	//
+	// If a zero-value then DefaultKeyExchangeInterval is used.
 	Interval time.Duration
-	Timeout  time.Duration
-	PSK      []byte
+
+	// Timeout defines how long it can wait after sending a request
+	// to exchange keys and before the successful key exchange. If
+	// it waits more than the timeout then an error is returned.
+	//
+	// If a zero-value then DefaultKeyExchangeTimeout is used.
+	Timeout time.Duration
+
+	// PSK is a Pre-Shared Key. If it is set then it is used as
+	// an additional source for ephemeral key ("cipher key") generation.
+	// So if it is set then to initiate a working session it's required to
+	// satisfy both conditions: valid (and expected) identities and the same PSK.
+	PSK []byte
 }
 
 func newKeyExchanger(
@@ -74,7 +109,7 @@ func newKeyExchanger(
 		localIdentity:  localIdentity,
 		remoteIdentity: remoteIdentity,
 		messenger:      messenger,
-		ecdh:           ecdh.NewCurve25519ECDH(),
+		ecdh:           ecdh.X25519(),
 	}
 
 	if opts != nil {
@@ -100,13 +135,10 @@ func (kx *keyExchanger) LockDo(fn func()) {
 }
 
 func (kx *keyExchanger) generateSharedKey(
-	localPrivateKey *[PrivateKeySize]byte,
-	remotePublicKey *[PublicKeySize]byte,
+	localPrivateKey *[curve25519PrivateKeySize]byte,
+	remotePublicKey *[curve25519PublicKeySize]byte,
 ) ([]byte, error) {
-	key, err := kx.ecdh.GenerateSharedSecret(localPrivateKey, remotePublicKey)
-	if err != nil {
-		return nil, wrapErrorf("unable to generate a shared secret: %w", err)
-	}
+	key := kx.ecdh.ComputeSecret(localPrivateKey, remotePublicKey)
 
 	psk := kx.options.PSK
 	if len(psk) > 0 {
@@ -132,6 +164,10 @@ func (kx *keyExchanger) isDone() bool {
 }
 
 func (kx *keyExchanger) Handle(b []byte) (err error) {
+	var nextLocal *[curve25519PrivateKeySize]byte
+	kx.nextLocalKeyLocker.RLockDo(func() {
+		nextLocal = kx.nextLocalPrivateKey
+	})
 	kx.LockDo(func() {
 		defer func() { err = wrapError(err) }()
 
@@ -144,7 +180,6 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 			kx.messenger.sess.debugf("wrong signature: %v", err)
 			return
 		}
-		nextLocal := kx.nextLocalPrivateKey
 		if nextLocal == nil {
 			return // Not ready, yet. It's required to call UpdateKey(), first
 		}
@@ -234,8 +269,12 @@ func (kx *keyExchanger) UpdateKey() {
 		kx.errFunc(wrapErrorf("unable to generate ECDH keys: %w", err))
 		return
 	}
-	kx.nextLocalPrivateKey = privKey.(*[PrivateKeySize]byte)
-	kx.nextLocalPublicKey = pubKey.(*[PublicKeySize]byte)
+	privKeyCasted := privKey.([curve25519PrivateKeySize]byte)
+	pubKeyCasted := pubKey.([curve25519PublicKeySize]byte)
+	kx.nextLocalKeyLocker.LockDo(func() {
+		kx.nextLocalPrivateKey = &privKeyCasted
+		kx.nextLocalPublicKey = &pubKeyCasted
+	})
 	return
 }
 

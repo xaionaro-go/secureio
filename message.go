@@ -31,6 +31,12 @@ func init() {
 	SetMaxPayloadSize(uint32(maxPossiblePacketSize - messagesContainerHeadersSize - messageHeadersSize))
 }
 
+// SetMaxPayloadSize sets the default MaxPayloadSize.
+//
+// MaxPayloadSize is used to calculate the size of the buffers to be
+// used to handle the communication. So you cannot send/read a message
+// via a session larger than session's MaxPayloadSize
+// (see `GetMaxPayloadSize`).
 func SetMaxPayloadSize(newSize uint32) {
 	newSize &= ^(uint32(aes.BlockSize) - 1)
 	atomic.StoreUint32(&maxPayloadSize, newSize)
@@ -40,80 +46,124 @@ var (
 	poly1305KeyXORer = []byte("github.com/xaionaro-go/secureio github.com/xaionaro-go/secureio github.com/xaionaro-go/secureio github.com/xaionaro-go/secureio")
 )
 
+// MessageType is the identifier of the type of the message.
+// It is used to determine how to interpret the message (which Handler to use).
 type MessageType uint8
 
 const (
-	MessageType_undefined = iota
-	MessageType_keyExchange
-	MessageType_dataPacketType0
-	MessageType_dataPacketType1
-	MessageType_dataPacketType2
-	MessageType_dataPacketType3
-	MessageType_dataPacketType4
-	MessageType_dataPacketType5
-	MessageType_dataPacketType6
-	MessageType_dataPacketType7
-	MessageType_dataPacketType8
-	MessageType_dataPacketType9
-	MessageType_dataPacketType10
-	MessageType_dataPacketType11
-	MessageType_dataPacketType12
-	MessageType_dataPacketType13
-	MessageType_dataPacketType14
-	MessageType_dataPacketType15
+	messageTypeUndefined = iota
+	messageTypeKeyExchange
 
+	// MessageTypeDataPacketType0 is the default MessageType for
+	// the in-band data. It used by default for (*Session).Read and
+	// (*Session).Write.
+	MessageTypeDataPacketType0
+
+	// MessageTypeDataPacketType1 is a MessageType for a custom Handler.
+	MessageTypeDataPacketType1
+
+	// MessageTypeDataPacketType2 is a MessageType for a custom Handler.
+	MessageTypeDataPacketType2
+
+	// MessageTypeDataPacketType3 is a MessageType for a custom Handler.
+	MessageTypeDataPacketType3
+
+	// MessageTypeDataPacketType4 is a MessageType for a custom Handler.
+	MessageTypeDataPacketType4
+
+	// MessageTypeDataPacketType5 is a MessageType for a custom Handler.
+	MessageTypeDataPacketType5
+
+	// MessageTypeDataPacketType6 is a MessageType for a custom Handler.
+	MessageTypeDataPacketType6
+
+	// MessageTypeDataPacketType7 is a MessageType for a custom Handler.
+	MessageTypeDataPacketType7
+
+	// MessageTypeDataPacketType8 is a MessageType for a custom Handler.
+	MessageTypeDataPacketType8
+
+	// MessageTypeDataPacketType9 is a MessageType for a custom Handler.
+	MessageTypeDataPacketType9
+
+	// MessageTypeDataPacketType10 is a MessageType for a custom Handler.
+	MessageTypeDataPacketType10
+
+	// MessageTypeDataPacketType11 is a MessageType for a custom Handler.
+	MessageTypeDataPacketType11
+
+	// MessageTypeDataPacketType12 is a MessageType for a custom Handler.
+	MessageTypeDataPacketType12
+
+	// MessageTypeDataPacketType13 is a MessageType for a custom Handler.
+	MessageTypeDataPacketType13
+
+	// MessageTypeDataPacketType14 is a MessageType for a custom Handler.
+	MessageTypeDataPacketType14
+
+	// MessageTypeDataPacketType15 is a MessageType for a custom Handler.
+	MessageTypeDataPacketType15
+
+	// MessageTypeMax is supposed to be used as a loop limiter to
+	// iterate over all message types. For example:
+	//
+	// ```
+	// for msgType := MessageType(0); msgType < MessageTypeMax; msgType++ {
+	//     [... some code here ...]
+	// }
+	// ```
 	MessageTypeMax
 )
 
 func (t MessageType) String() string {
 	switch t {
-	case MessageType_undefined:
+	case messageTypeUndefined:
 		return `undefined`
-	case MessageType_keyExchange:
+	case messageTypeKeyExchange:
 		return `key_exchange`
-	case MessageType_dataPacketType0:
+	case MessageTypeDataPacketType0:
 		return `datatype0`
-	case MessageType_dataPacketType1:
+	case MessageTypeDataPacketType1:
 		return `datatype1`
-	case MessageType_dataPacketType2:
+	case MessageTypeDataPacketType2:
 		return `datatype2`
-	case MessageType_dataPacketType3:
+	case MessageTypeDataPacketType3:
 		return `datatype3`
-	case MessageType_dataPacketType4:
+	case MessageTypeDataPacketType4:
 		return `datatype4`
-	case MessageType_dataPacketType5:
+	case MessageTypeDataPacketType5:
 		return `datatype5`
-	case MessageType_dataPacketType6:
+	case MessageTypeDataPacketType6:
 		return `datatype6`
-	case MessageType_dataPacketType7:
+	case MessageTypeDataPacketType7:
 		return `datatype7`
-	case MessageType_dataPacketType8:
+	case MessageTypeDataPacketType8:
 		return `datatype8`
-	case MessageType_dataPacketType9:
+	case MessageTypeDataPacketType9:
 		return `datatype9`
-	case MessageType_dataPacketType10:
+	case MessageTypeDataPacketType10:
 		return `datatype10`
-	case MessageType_dataPacketType11:
+	case MessageTypeDataPacketType11:
 		return `datatype11`
-	case MessageType_dataPacketType12:
+	case MessageTypeDataPacketType12:
 		return `datatype12`
-	case MessageType_dataPacketType13:
+	case MessageTypeDataPacketType13:
 		return `datatype13`
-	case MessageType_dataPacketType14:
+	case MessageTypeDataPacketType14:
 		return `datatype14`
-	case MessageType_dataPacketType15:
+	case MessageTypeDataPacketType15:
 		return `datatype15`
 	}
 	return `unknown`
 }
 
-type MessageLength uint32
+type messageLength uint32
 
 type messageHeadersData struct {
 	Type      MessageType
 	Reserved0 uint8
 	Reserved1 uint16
-	Length    MessageLength
+	Length    messageLength
 }
 
 type messageHeaders struct {
@@ -123,20 +173,20 @@ type messageHeaders struct {
 	isBusy bool
 }
 
-type MessagesContainerFlags uint8
+type messagesContainerFlags uint8
 
 const (
-	MessagesContainerFlagsIsEncrypted = MessagesContainerFlags(1 << iota)
+	messagesContainerFlagsIsEncrypted = messagesContainerFlags(1 << iota)
 )
 
-func (flags MessagesContainerFlags) IsEncrypted() bool {
-	return flags&MessagesContainerFlagsIsEncrypted != 0
+func (flags messagesContainerFlags) IsEncrypted() bool {
+	return flags&messagesContainerFlagsIsEncrypted != 0
 }
-func (flags *MessagesContainerFlags) SetIsEncrypted(newValue bool) {
+func (flags *messagesContainerFlags) SetIsEncrypted(newValue bool) {
 	if newValue {
-		*flags |= MessagesContainerFlagsIsEncrypted
+		*flags |= messagesContainerFlagsIsEncrypted
 	} else {
-		*flags &= ^MessagesContainerFlagsIsEncrypted
+		*flags &= ^messagesContainerFlagsIsEncrypted
 	}
 }
 
@@ -172,8 +222,8 @@ type messagesContainerHeadersData struct {
 	ContainerHeadersChecksum [poly1305.TagSize]byte
 	MessagesChecksum         [poly1305.TagSize]byte
 	CreatedAt                uint64
-	Length                   MessageLength
-	MessagesContainerFlags
+	Length                   messageLength
+	messagesContainerFlags
 	Reserved0 uint8
 	Reserved1 uint16
 }
@@ -191,7 +241,7 @@ var (
 )
 
 func (hdr *messageHeadersData) Reset() {
-	hdr.Type = MessageType_undefined
+	hdr.Type = messageTypeUndefined
 	hdr.Reserved0 = 0
 	hdr.Length = 0
 }
@@ -213,7 +263,7 @@ func newMessageHeadersPool() *messageHeadersPool {
 
 func (hdr *messageHeadersData) Set(msgType MessageType, payload []byte) {
 	hdr.Type = msgType
-	hdr.Length = MessageLength(len(payload))
+	hdr.Length = messageLength(len(payload))
 }
 
 func (pool *messageHeadersPool) AcquireMessageHeaders() *messageHeaders {
@@ -243,7 +293,7 @@ func (hdr *messageHeadersData) Read(b []byte) (int, error) {
 		return 0, newErrTooShort(messageHeadersSize, uint(len(b)))
 	}
 	hdr.Type = MessageType(b[0])
-	hdr.Length = MessageLength(binaryOrderType.Uint32(b[4:]))
+	hdr.Length = messageLength(binaryOrderType.Uint32(b[4:]))
 
 	return int(messageHeadersSize), nil
 }
@@ -313,9 +363,9 @@ func (containerHdr *messagesContainerHeadersData) ReadAfterIV(b []byte) (int, er
 	b = b[poly1305.TagSize:]
 	copy(containerHdr.MessagesChecksum[:], b[:poly1305.TagSize])
 	b = b[poly1305.TagSize:]
-	containerHdr.Length = MessageLength(binaryOrderType.Uint32(b))
+	containerHdr.Length = messageLength(binaryOrderType.Uint32(b))
 	b = b[4:]
-	containerHdr.MessagesContainerFlags = MessagesContainerFlags(b[0])
+	containerHdr.messagesContainerFlags = messagesContainerFlags(b[0])
 	b = b[1:]
 	containerHdr.Reserved0 = b[0]
 	b = b[1:]
@@ -341,7 +391,7 @@ func (containerHdr *messagesContainerHeadersData) Write(b []byte) (int, error) {
 	b = b[poly1305.TagSize:]
 	binaryOrderType.PutUint32(b, uint32(containerHdr.Length))
 	b = b[4:]
-	b[0] = uint8(containerHdr.MessagesContainerFlags)
+	b[0] = uint8(containerHdr.messagesContainerFlags)
 	b = b[1:]
 	b[0] = containerHdr.Reserved0
 	b = b[1:]
@@ -355,24 +405,24 @@ var messagesContainerHeadersSizeBufPool = sync.Pool{New: func() interface{} {
 	return make([]byte, messagesContainerHeadersSize)
 }}
 
-func (containerHdr *messagesContainerHeadersData) WriteTo(w io.Writer) (int, error) {
+func (containerHdr *messagesContainerHeadersData) WriteTo(w io.Writer) (int64, error) {
 	buf := messagesContainerHeadersSizeBufPool.Get().([]byte)
 	defer messagesContainerHeadersSizeBufPool.Put(buf)
 
 	n0, err := containerHdr.Write(buf)
 	if err != nil {
-		return n0, wrapErrorf(
+		return int64(n0), wrapErrorf(
 			"unable to write the headers' data to a buffer: %w", err,
 		)
 	}
 
 	n1, err := w.Write(buf)
 	if err != nil {
-		return n1, wrapErrorf(
+		return int64(n1), wrapErrorf(
 			"unable to write headers' data from a buffer to a writer: %w", err,
 		)
 	}
-	return n0 + n1, nil
+	return int64(n0 + n1), nil
 }
 
 type messagesContainerHeadersPool struct {
@@ -411,7 +461,7 @@ func (pool *messagesContainerHeadersPool) Put(containerHdr *messagesContainerHea
 
 func (containerHdr *messagesContainerHeadersData) Set(cipherKey []byte, messagesBytes []byte) error {
 	containerHdr.SetIsEncrypted(cipherKey != nil)
-	containerHdr.Length = MessageLength(len(messagesBytes))
+	containerHdr.Length = messageLength(len(messagesBytes))
 	containerHdr.CalculateHeadersChecksumTo(cipherKey, &containerHdr.ContainerHeadersChecksum)
 	containerHdr.CalculateMessagesChecksumTo(cipherKey, &containerHdr.MessagesChecksum, messagesBytes)
 	return nil
@@ -421,7 +471,7 @@ func (containerHdr *messagesContainerHeadersData) Reset() {
 	containerHdr.Length = 0
 	slice.SetZeros(containerHdr.ContainerHeadersChecksum[:])
 	slice.SetZeros(containerHdr.MessagesChecksum[:])
-	containerHdr.MessagesContainerFlags = 0
+	containerHdr.messagesContainerFlags = 0
 	containerHdr.Reserved0 = 0
 	containerHdr.Reserved1 = 0
 }

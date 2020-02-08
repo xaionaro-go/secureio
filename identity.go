@@ -3,6 +3,7 @@ package secureio
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
 	"errors"
@@ -10,8 +11,6 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-
-	"golang.org/x/crypto/ed25519"
 )
 
 const (
@@ -20,11 +19,26 @@ const (
 	privateFileName = `id_ed25519.pub`
 )
 
+// Keys is a key pair used to generate signatures (to be verified on
+// the remote side) and to verify the remote side.
+//
+// If "Private" key is defined than it could be used for a local identity
+// If "Public" key is defined than it could be used for a remote identity.
 type Keys struct {
 	Public  ed25519.PublicKey
 	Private ed25519.PrivateKey
 }
 
+// Identity is a subject of a (secure) communication. Identity is used to
+// be identified as the subject that is expected to be communicating with.
+//
+// If the "Private" key is set then the identity could be used as a "local
+// identity", so it could be used to represent the communication participant
+// to a remote side.
+//
+// If the "Public" key is set then the identity could be used as a "remote
+// identity", so it could be used to verify the communication participant
+// of the remote side.
 type Identity struct {
 	Keys Keys
 }
@@ -39,11 +53,27 @@ type Identity struct {
 	}
 }*/
 
+// NewIdentity is a constructor for `Identity` based on the path
+// to ED25519 keys. It:
+// * Parses ED25519 keys from directory `keysDir` if they exists
+//   and creates a new instance of `*Identity`.
+// * Creates ED25510 keys and saves them to the directory `keysDir` if they
+//   does not exist there and creates a new instance of `*Identity`.
+//
+// File names in the directory are `id_ed25519` and `id_ed25519.pub`.
+//
+// The returned identity (if it is not `nil`) could be
+// used as both: local and remote (see `Identity`).
 func NewIdentity(keysDir string) (*Identity, error) {
 	i := &Identity{}
 	return i, i.prepareKeys(keysDir)
 }
 
+// NewIdentityFromPrivateKey is a constructor for `Identity` based
+// on private ED25519 key.
+//
+// The returned identity could be used as both: local and remote
+// (see `Identity`).
 func NewIdentityFromPrivateKey(privKey ed25519.PrivateKey) *Identity {
 	i := &Identity{}
 	i.Keys.Private = privKey
@@ -51,11 +81,22 @@ func NewIdentityFromPrivateKey(privKey ed25519.PrivateKey) *Identity {
 	return i
 }
 
+// NewRemoteIdentity is a constructor for `Identity` based on the path
+// to the ED25519 public key. It parses the public key from the directory
+// `keysDir`. The file name is `id_ed25519.pub`.
+//
+// The returned identity (if it is not `nil`) could be
+// used only as a remote identity (see `Identity`).
 func NewRemoteIdentity(keyPath string) (*Identity, error) {
 	i := &Identity{}
 	return i, loadPublicKeyFromFile(&i.Keys.Public, keyPath)
 }
 
+// NewRemoteIdentityFromPublicKey is a constructor for `Identity` based on
+// the ED25519 public key.
+//
+// The returned identity could be used only as a remote identity
+// (see `Identity`).
 func NewRemoteIdentityFromPublicKey(pubKey ed25519.PublicKey) *Identity {
 	i := &Identity{}
 	i.Keys.Public = pubKey
@@ -171,6 +212,15 @@ func (i *Identity) prepareKeys(keysDir string) error {
 	return nil
 }
 
+// NewSession creates a secure session over (unsecure) `backend`.
+//
+// The session verifies the remote side using `remoteIdentity`,
+// securely exchanges with encryption keys and allows
+// to communicate through it.
+// Nothing else should write-to or/and read-from the `backend` while
+// the session is active.
+//
+// See `Session`.
 func (i *Identity) NewSession(
 	ctx context.Context,
 	remoteIdentity *Identity,
@@ -181,13 +231,25 @@ func (i *Identity) NewSession(
 	return newSession(ctx, i, remoteIdentity, backend, eventHandler, opts)
 }
 
+// MutualConfirmationOfIdentity is a helper which creates a temporary
+// session to verify the remote side and (securely) exchange
+// with an ephemeral key.
+// If this method is used then it should be used on the both sides.
+// While an execution of the method nothing else should write-to
+// or/and read-from the `backend`.
+// By the end of execution of this method the temporary session will be closed
+// and then the backend will be free to be used for other purposes.
+//
+// This method could be used for example to:
+// * Verify if the expected participant is on the remote side.
+// * Easy and securely create a new shared key with the remote side.
 func (i *Identity) MutualConfirmationOfIdentity(
 	ctx context.Context,
 	remoteIdentity *Identity,
 	backend io.ReadWriteCloser,
 	eventHandler EventHandler,
 	options *SessionOptions,
-) (xerr error, ephemeralKey []byte) {
+) (ephemeralKey []byte, xerr error) {
 	var n int
 
 	var opts SessionOptions
@@ -254,6 +316,7 @@ func (i *Identity) MutualConfirmationOfIdentity(
 	return
 }
 
+// VerifySignature just verifies an ED25519 signature `signature` over `data`.
 func (i *Identity) VerifySignature(signature, data []byte) error {
 	if !ed25519.Verify(i.Keys.Public, data, signature) {
 		return newErrInvalidSignature()
@@ -261,6 +324,7 @@ func (i *Identity) VerifySignature(signature, data []byte) error {
 	return nil
 }
 
+// Sign just fills `signature` with an ED25519 signature of `data`.
 func (i *Identity) Sign(signature, data []byte) {
 	result := ed25519.Sign(i.Keys.Private, data)
 	copy(signature, result)

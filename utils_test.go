@@ -1,4 +1,4 @@
-package secureio
+package secureio_test
 
 import (
 	"fmt"
@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/xaionaro-go/errors"
+
+	. "github.com/xaionaro-go/secureio"
 )
 
 const (
@@ -73,18 +75,18 @@ func readLogsOfSession(t *testing.T, enableInfo bool, sess *Session) {
 				if !ok {
 					return
 				}
-				fmt.Printf("D:%v:SID:%v: "+debugOutput.format+"\n",
-					append([]interface{}{t.Name(), sess.ID()}, debugOutput.args...)...)
+				fmt.Printf("D:%v:SID:%v: "+debugOutput.Format+"\n",
+					append([]interface{}{t.Name(), sess.ID()}, debugOutput.Args...)...)
 			case infoOutput, ok := <-sess.InfoOutputChan():
 				if !ok {
 					return
 				}
 				if !enableInfo {
-					fmt.Printf("I:%v:SID:%v: "+infoOutput.format+"\n",
-						append([]interface{}{t.Name(), sess.ID()}, infoOutput.args...)...)
+					fmt.Printf("I:%v:SID:%v: "+infoOutput.Format+"\n",
+						append([]interface{}{t.Name(), sess.ID()}, infoOutput.Args...)...)
 					return
 				}
-				t.Errorf("[I] "+infoOutput.format, infoOutput.args...)
+				t.Errorf("[I] "+infoOutput.Format, infoOutput.Args...)
 			}
 		}
 	}()
@@ -185,4 +187,30 @@ func testConnIsOpen(t *testing.T, conn0, conn1 io.ReadWriteCloser) {
 	_, err = conn1.Read(b)
 	assert.NoError(t, err)
 	assert.Equal(t, `test`, string(b))
+}
+
+type dummyEventHandler struct{}
+
+func (h *dummyEventHandler) OnInit(*Session)            {}
+func (h *dummyEventHandler) OnConnect(*Session)         {}
+func (h *dummyEventHandler) IsDebugEnabled() bool       { return false }
+func (h *dummyEventHandler) Error(*Session, error) bool { return false }
+
+type errorHandlerWrapper struct {
+	EventHandler
+	ErrorHandler func(*Session, error) bool
+}
+
+func wrapErrorHandler(
+	eventHandler EventHandler,
+	errorHandler func(*Session, error) bool,
+) EventHandler {
+	if eventHandler == nil {
+		eventHandler = &dummyEventHandler{}
+	}
+	return &errorHandlerWrapper{eventHandler, errorHandler}
+}
+
+func (wrapper *errorHandlerWrapper) Error(sess *Session, err error) bool {
+	return wrapper.ErrorHandler(sess, err)
 }

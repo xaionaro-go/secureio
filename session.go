@@ -13,12 +13,20 @@ import (
 	"unsafe"
 
 	"github.com/aead/chacha20/chacha"
+	"github.com/mohae/deepcopy"
 	"golang.org/x/crypto/poly1305"
 )
 
 const (
+	// DefaultErrorOnSequentialDecryptFailsCount defines the default value
+	// of how many sequential messages is required be failed to be decrypted
+	// to consider this fails to be erroneous situation.
 	DefaultErrorOnSequentialDecryptFailsCount = 3
-	DefaultSendDelay                          = time.Microsecond * 50
+
+	// DefaultSendDelay defines the default messages aggregation delay.
+	// It is used to merge small messages into one while sending it
+	// through the backend to reduce overheads.
+	DefaultSendDelay = time.Microsecond * 50
 )
 
 const (
@@ -31,20 +39,21 @@ func roundSize(size, blockSize uint32) uint32 {
 	return (size + (blockSize - 1)) & ^(blockSize - 1)
 }
 
-/*type Checksumer interface {
-	io.Writer
-
-	Sum64() uint64
-	Reset()
-}*/
-
+// Session is an encrypted communication session which:
+// * Verifies the remote side.
+// * Uses ephemeral encryption keys ("cipher key") to encrypt/decrypt the traffic.
+//
+// When a Session is already in work, nothing else should Read-from/Write-to
+// the backend io.ReadWriteCloser of the session.
+//
+// Session also implements io.ReadWriteCloser.
 type Session struct {
 	locker sync.RWMutex
 
 	id             uint64
 	ctx            context.Context
 	cancelFunc     context.CancelFunc
-	state          SessionState
+	state          *sessionStateStorage
 	identity       *Identity
 	remoteIdentity *Identity
 	options        SessionOptions
@@ -53,7 +62,7 @@ type Session struct {
 	keyExchanger         *keyExchanger
 	backend              io.ReadWriteCloser
 	messenger            [MessageTypeMax]*Messenger
-	ReadChan             [MessageTypeMax]chan *ReadItem
+	ReadChan             [MessageTypeMax]chan *readItem
 	currentSecret        []byte
 	cipherKey            *[]byte
 	previousCipherKey    *[]byte
@@ -69,7 +78,7 @@ type Session struct {
 	messagesContainerHeadersPool *messagesContainerHeadersPool
 
 	delayedSendInfo          *SendInfo
-	delayedWriteBuf          *Buffer
+	delayedWriteBuf          *buffer
 	delayedSenderTimer       *time.Timer
 	delayedSenderTimerLocker lockerMutex
 	delayedSenderLocker      sync.Mutex
@@ -92,20 +101,71 @@ type Session struct {
 	pauseLocker sync.Mutex
 	isReading   uint64
 }
+
+// DebugOutputEntry is a structure of data which is being passed to a debugger
+//
+// See `(*Session).DebugOutputChan()` and `(*Session).InfoOutputChan()`.
 type DebugOutputEntry struct {
-	format string
-	args   []interface{}
+	// Format has the same meaning as the first argument to `fmt.Printf`
+	Format string
+
+	// Args has the same meaning as the rest arguments (except the first one)
+	// to `fmt.Printf`
+	Args []interface{}
 }
 
+// SessionOptions is a structure to configure a Session while calling
+// `(*Identity).NewSession`.
 type SessionOptions struct {
-	EnableDebug                         bool
-	SendDelay                           *time.Duration
-	DetachOnMessagesCount               uint64
+	// EnableDebug enables the DEBUG messages to be passed through
+	// `(*Session).DebugOutputChan()`. It causes performance penalty.
+	EnableDebug bool
+
+	// EnableInfo enables the INFO messages to be passed through
+	// `(*Session).InfoOutputChan()`. It causes performance penalty.
+	EnableInfo bool
+
+	// SendDelay is the aggregation delay.
+	// It is used to merge small messages into one while sending it
+	// through the backend to reduce overheads.
+	//
+	// If it is set to a zero-value then DefaultSendDelay is used instead.
+	SendDelay *time.Duration
+
+	// DetachOnMessagesCount is an amount of incoming messages after which
+	// a Session will detach from the backend and close itself.
+	//
+	// If it is set to a zero-value then "never".
+	DetachOnMessagesCount uint64
+
+	// DetachOnSequentialDecryptFailsCount is an amount of sequential incoming
+	// messages failed to be decrypted after which a Session will detach from
+	// the backend and close itself.
+	//
+	// If it is set to a zero-value then "never".
 	DetachOnSequentialDecryptFailsCount uint64
-	ErrorOnSequentialDecryptFailsCount  *uint64
-	KeyExchangerOptions                 KeyExchangerOptions
-	MaxPayloadSize                      uint32
-	OnInitFuncs                         []OnInitFunc
+
+	// ErrorOnSequentialDecryptFailsCount is an amount of sequential incoming
+	// messages failed to be decrypted after which a Session will report
+	// and error.
+	//
+	// If it is set to a zero-value then
+	// DefaultErrorOnSequentialDecryptFailsCount will be used instead.
+	ErrorOnSequentialDecryptFailsCount *uint64
+
+	// KeyExchangerOptions is the structure with options related only
+	// to the key exchanging.
+	//
+	// See the description of fields of KeyExchangerOptions.
+	KeyExchangerOptions KeyExchangerOptions
+
+	// MaxPayloadSize defines the maximal size of a messages passed
+	// through the Session. The more this value is the more memory is consumed.
+	MaxPayloadSize uint32
+
+	// OnInitFuncs are the function which will be called right before start
+	// the Session (but after performing the self-configuration).
+	OnInitFuncs []OnInitFunc
 
 	// AllowReorderingAndDuplication disables checks of
 	// the timestamps (within messages). So even if messages
@@ -117,22 +177,39 @@ type SessionOptions struct {
 	AllowReorderingAndDuplication bool
 }
 
+// OnInitFunc is a function which will be called after a Session
+// already setup everything to be ready-to-go, but not started, yet.
 type OnInitFunc func(sess *Session)
 
+// GetUnexpectedPacketIDCount returns the amount of packets which were
+// ignored due to a wrong PacketID.
+//
+// See option `SessionOptions.AllowReorderingAndDuplication`.
+func (sess *Session) GetUnexpectedPacketIDCount() uint64 {
+	return atomic.LoadUint64(&sess.unexpectedPacketIDCount)
+}
+
+// DebugOutputChan returns the channel to receive the DEBUG messages from.
 func (sess *Session) DebugOutputChan() <-chan DebugOutputEntry {
 	return sess.debugOutputChan
 }
 
+// InfoOutputChan returns the channel to receive the INFO messages from.
 func (sess *Session) InfoOutputChan() <-chan DebugOutputEntry {
 	return sess.infoOutputChan
 }
 
-func (sess *Session) WaitForState(states ...SessionState) SessionState {
-	return sess.state.WaitFor(states...)
+// WaitForState waits until the Session will get into any of the selected
+// states.
+func (sess *Session) WaitForState(ctx context.Context, states ...SessionState) SessionState {
+	return sess.state.WaitFor(ctx, states...)
 }
 
+// GetState returns the current state of the Session.
+//
+// See SessionState.
 func (sess *Session) GetState() SessionState {
-	return sess.state.Get()
+	return sess.state.Load()
 }
 
 func (sess *Session) setState(state SessionState, cancelOnStates ...SessionState) (oldState SessionState) {
@@ -164,7 +241,7 @@ func newSession(
 		id:                   atomic.AddUint64(&nextSessionID, 1) - 1,
 		identity:             identity,
 		remoteIdentity:       remoteIdentity,
-		state:                SessionState_new,
+		state:                newSessionStateStorage(),
 		backend:              backend,
 		eventHandler:         eventHandler,
 		waitForCipherKeyChan: make(chan struct{}),
@@ -220,30 +297,39 @@ func newSession(
 	sess.sendDelayedCond = sync.NewCond(&sess.sendDelayedCondLocker)
 
 	for i := 0; i < MessageTypeMax; i++ {
-		sess.ReadChan[i] = make(chan *ReadItem, messageQueueLength)
-	}
-
-	for _, onInitFunc := range sess.options.OnInitFuncs {
-		onInitFunc(sess)
+		sess.ReadChan[i] = make(chan *readItem, messageQueueLength)
 	}
 
 	panicIf(sess.init())
 	return sess
 }
 
+// GetMaxPayloadSize returns the currently configured MaxPayLoadSize
+// of this Session.
+//
+// See SessionOptions.MaxPayloadSize
 func (sess *Session) GetMaxPayloadSize() uint32 {
 	return sess.options.MaxPayloadSize
 }
 
+// GetMaxPacketSize returns the currently configured maximal packet size
+// that could be sent through the backend io.ReadWriteCloser.
+//
+// The value is calculated based on SessionOptions.MaxPayloadSize with
+// addition of sizes of headers and paddings.
 func (sess *Session) GetMaxPacketSize() uint32 {
 	return sess.maxPacketSize
 }
 
+// ID returns the unique (though the program execution) session ID
 func (sess *Session) ID() uint64 {
 	return sess.id
 }
 
 func (sess *Session) init() error {
+	for _, onInitFunc := range sess.options.OnInitFuncs {
+		onInitFunc(sess)
+	}
 	sess.eventHandler.OnInit(sess)
 	sess.startKeyExchange()
 	sess.startReader()
@@ -267,7 +353,7 @@ func (sess *Session) startBackendCloser() {
 		case <-sess.ctx.Done():
 		}
 
-		sess.setState(SessionState_closing, SessionState_closed)
+		sess.setState(SessionStateClosing, SessionStateClosed)
 
 		recvMsgCount := atomic.LoadUint64(&sess.receivedMessagesCount)
 		seqDecryptFailsCount := atomic.LoadUint64(&sess.sequentialDecryptFailsCount)
@@ -292,18 +378,18 @@ func (sess *Session) startBackendCloser() {
 	}()
 }
 
-func (sess *Session) isDoneFast() bool {
+func (sess *Session) isDone() bool {
 	switch sess.state.Load() {
-	case SessionState_new, SessionState_keyExchanging,
-		SessionState_established, SessionState_paused:
+	case SessionStateNew, SessionStateKeyExchanging,
+		SessionStateEstablished, SessionStatePaused:
 		return false
-	case sessionState_inTransition:
-		return sess.isDone()
+	case sessionStateInTransition:
+		return sess.isDoneSlow()
 	}
 	return true
 }
 
-func (sess *Session) isDone() bool {
+func (sess *Session) isDoneSlow() bool {
 	select {
 	case <-sess.ctx.Done():
 		return true
@@ -316,10 +402,10 @@ func (sess *Session) isDone() bool {
 // from the backend Reader. It does not stop currently running
 // `Read()` from the backend Reader, so it's required to wait
 // for the next message to get the affection.
-// SetPause(true) could be used only from state SessionState_established.
+// SetPause(true) could be used only from state SessionStateEstablished.
 //
 // SetPause with value `false` re-enables the reading process from
-// the backend Reader. It could be used only from state SessionState_paused.
+// the backend Reader. It could be used only from state SessionStatePaused.
 //
 // Returns true if the action was successful.
 func (sess *Session) SetPause(newValue bool) (result bool) {
@@ -327,20 +413,20 @@ func (sess *Session) SetPause(newValue bool) (result bool) {
 	defer func() { sess.debugf("SetPause(%v) -> %v", newValue, result) }()
 
 	badStates := []SessionState{
-		SessionState_new,
-		SessionState_closing,
-		SessionState_closed,
-		SessionState_keyExchanging,
+		SessionStateNew,
+		SessionStateClosing,
+		SessionStateClosed,
+		SessionStateKeyExchanging,
 	}
 
 	sess.LockDo(func() {
 		if newValue {
-			if sess.setState(SessionState_paused, badStates...) == SessionState_established {
+			if sess.setState(SessionStatePaused, badStates...) == SessionStateEstablished {
 				sess.pauseLocker.Lock()
 				result = true
 			}
 		} else {
-			if sess.setState(SessionState_established, badStates...) == SessionState_paused {
+			if sess.setState(SessionStateEstablished, badStates...) == SessionStatePaused {
 				sess.pauseLocker.Unlock()
 				result = true
 			}
@@ -351,7 +437,7 @@ func (sess *Session) SetPause(newValue bool) (result bool) {
 }
 
 func (sess *Session) waitForUnpause() {
-	if sess.GetState() != SessionState_paused {
+	if sess.GetState() != SessionStatePaused {
 		return
 	}
 
@@ -361,6 +447,11 @@ func (sess *Session) waitForUnpause() {
 	sess.debugf("the blocking of readerLoop() by a pause has finished, continuing...")
 }
 
+// IsReading returns true if the session is being waiting for Read from
+// the backend to be returned (the reading from the backend is currently busy
+// by this Session)
+//
+// See also `(*Session).SetPause`.
 func (sess *Session) IsReading() bool {
 	return atomic.LoadUint64(&sess.isReading) != 0
 }
@@ -376,7 +467,7 @@ func (sess *Session) setIsReading(v bool) {
 
 func (sess *Session) readerLoop() {
 	defer func() {
-		sess.debugf("\n/readerLoop: %v %v", sess.state.Load(), sess.isDone())
+		sess.debugf("\n/readerLoop: %v %v", sess.state.Load(), sess.isDoneSlow())
 
 		sess.cancelFunc()
 
@@ -388,7 +479,7 @@ func (sess *Session) readerLoop() {
 		}
 		for idx, ch := range sess.ReadChan {
 			close(ch)
-			if idx == MessageType_dataPacketType0 {
+			if idx == MessageTypeDataPacketType0 {
 				// It is used in read(), so to prevent race-condition
 				// we just preserve it.
 				continue
@@ -396,17 +487,17 @@ func (sess *Session) readerLoop() {
 			sess.ReadChan[idx] = nil
 		}
 
-		sess.setState(SessionState_closed)
+		sess.setState(SessionStateClosed)
 		sess.debugf("secureio session closed")
 		close(sess.debugOutputChan)
 		close(sess.infoOutputChan)
 	}()
 
 	var inputBuffer = make([]byte, sess.GetMaxPacketSize())
-	var decryptedBuffer Buffer
+	var decryptedBuffer buffer
 	decryptedBuffer.Grow(uint(sess.GetMaxPacketSize()))
 
-	for !sess.isDoneFast() {
+	for !sess.isDone() {
 		sess.ifDebug(func() { sess.debugf("n, err := sess.backend.Read(inputBuffer)") })
 		sess.waitForUnpause()
 		sess.setIsReading(true)
@@ -416,7 +507,7 @@ func (sess *Session) readerLoop() {
 			sess.debugf("/n, err := sess.backend.Read(inputBuffer): %v | %v | %v", n, err, sess.state.Load())
 		})
 		if err != nil {
-			if sess.isDoneFast() {
+			if sess.isDone() {
 				return
 			}
 			if !sess.eventHandler.Error(sess,
@@ -508,7 +599,7 @@ func (sess *Session) processIncomingMessages(
 		}
 
 		var receivedMessagesCount uint64
-		if sess.options.DetachOnMessagesCount > 0 && hdr.Type != MessageType_keyExchange {
+		if sess.options.DetachOnMessagesCount > 0 && hdr.Type != messageTypeKeyExchange {
 			receivedMessagesCount = atomic.AddUint64(&sess.receivedMessagesCount, 1)
 		}
 
@@ -528,7 +619,7 @@ func (sess *Session) processIncomingMessages(
 
 func (sess *Session) processIncomingMessage(hdr *messageHeadersData, payload []byte) {
 	if sess.messenger[hdr.Type] != nil {
-		if err := sess.messenger[hdr.Type].Handle(payload[:hdr.Length]); err != nil {
+		if err := sess.messenger[hdr.Type].handle(payload[:hdr.Length]); err != nil {
 			sess.eventHandler.Error(sess, wrapErrorf("unable to handle a message: %w", err))
 		}
 		return
@@ -537,12 +628,12 @@ func (sess *Session) processIncomingMessage(hdr *messageHeadersData, payload []b
 	item := sess.readItemPool.AcquireReadItem(sess.GetMaxPacketSize())
 	item.Data = item.Data[0:hdr.Length]
 	copy(item.Data, payload[0:hdr.Length])
-	sess.debugf(`sent the message %v of length %v to a messenger`, hdr, len(item.Data))
+	sess.debugf(`sent the message %v of length %v to a Messenger`, hdr, len(item.Data))
 	sess.ReadChan[hdr.Type] <- item
 }
 
 func (sess *Session) decrypt(
-	decrypted *Buffer,
+	decrypted *buffer,
 	encrypted []byte,
 ) (
 	containerHdr *messagesContainerHeaders,
@@ -688,6 +779,8 @@ func (sess *Session) isAlreadyLockedByMe() bool {
 	return false
 }
 
+// LockDo locks the call of this method for other goroutines,
+// executes the function `fn` and unlocks the call.
 func (sess *Session) LockDo(fn func()) {
 	if !sess.isAlreadyLockedByMe() {
 		sess.locker.Lock()
@@ -696,8 +789,10 @@ func (sess *Session) LockDo(fn func()) {
 	fn()
 }
 
+// NewMessenger returns a io.ReadWriteCloser for a specified MessageType.
+// It overrides other handlers/messengers for this MessageType (if they set).
 func (sess *Session) NewMessenger(msgType MessageType) *Messenger {
-	if sess.isDone() {
+	if sess.isDoneSlow() {
 		return nil
 	}
 	messenger := newMessenger(msgType, sess)
@@ -706,7 +801,7 @@ func (sess *Session) NewMessenger(msgType MessageType) *Messenger {
 }
 
 type handlerByFuncs struct {
-	DummyMessenger
+	dummyMessenger
 	HandleFunc  func([]byte) error
 	OnErrorFunc func(error)
 }
@@ -728,6 +823,9 @@ func (h *handlerByFuncs) HandleError(err error) {
 	h.OnErrorFunc(err)
 }
 
+// SetHandlerFuncs sets Handler functions for the specified MessageType:
+// * `handle` handles incoming traffic/messages.
+// * `onError` handles errors.
 func (sess *Session) SetHandlerFuncs(
 	msgType MessageType,
 	handle func([]byte) error,
@@ -737,13 +835,14 @@ func (sess *Session) SetHandlerFuncs(
 	messenger.SetHandler(&handlerByFuncs{HandleFunc: handle, OnErrorFunc: onError})
 }
 
-func (sess *Session) GetDelayedWriteLength() (result MessageLength) {
-	sess.delayedWriteBufRLockDo(func(buf *Buffer) {
-		result = MessageLength(len(buf.Bytes))
+func (sess *Session) getDelayedWriteLength() (result messageLength) {
+	sess.delayedWriteBufRLockDo(func(buf *buffer) {
+		result = messageLength(len(buf.Bytes))
 	})
 	return
 }
 
+// WriteMessage synchronously sends a message of MessageType `msgType`.
 func (sess *Session) WriteMessage(
 	msgType MessageType,
 	payload []byte,
@@ -760,6 +859,10 @@ func (sess *Session) WriteMessage(
 	return 0, err
 }
 
+// GetCipherKey returns the current cipher key.
+// Do not modify it, it's not a copy.
+//
+// It returns nil if there was no successful key exchange, yet.
 func (sess *Session) GetCipherKey() []byte {
 	return *(*[]byte)(
 		atomic.LoadPointer(
@@ -770,6 +873,9 @@ func (sess *Session) GetCipherKey() []byte {
 	)
 }
 
+// GetCipherKeyWait waits until the first successful key exchange and
+// returns the latest cipher key.
+// Do not modify it, it's not a copy.
 func (sess *Session) GetCipherKeyWait() []byte {
 	cipherKey := sess.GetCipherKey()
 	if cipherKey != nil {
@@ -784,6 +890,9 @@ func (sess *Session) GetCipherKeyWait() []byte {
 	return cipherKey
 }
 
+// GetPreviousCipherKey returns the previous cipher key.
+// Do not modify it, it's not a copy.
+// It returns nil, if there were less than 2 successful key exchanges.
 func (sess *Session) GetPreviousCipherKey() []byte {
 	return *(*[]byte)(
 		atomic.LoadPointer(
@@ -794,16 +903,20 @@ func (sess *Session) GetPreviousCipherKey() []byte {
 	)
 }
 
-// if msgType == MessageType_keyExchange or SendDelay is zero then
-// it will write the message synchronously anyway.
+// WriteMessageAsync asynchronously writes a message of MessageType `msgType`.
+//
+// Temporary hack (may be will be removed in future):
+// If SendDelay is zero then the message will be sent synchronously, anyway.
 func (sess *Session) WriteMessageAsync(
 	msgType MessageType,
 	payload []byte,
 ) (sendInfo *SendInfo) {
+	// if msgType == messageType_keyExchange or SendDelay is zero then
+	// it will write the message synchronously anyway.
 	if uint32(len(payload)) > sess.GetMaxPayloadSize() {
 		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 		sendInfo.Err = newErrPayloadTooBig(uint(sess.GetMaxPayloadSize()), uint(len(payload)))
-		close(sendInfo.C)
+		close(sendInfo.c)
 		return
 	}
 
@@ -811,16 +924,16 @@ func (sess *Session) WriteMessageAsync(
 	hdr.Set(msgType, payload)
 	defer hdr.Release()
 
-	if msgType == MessageType_keyExchange || sess.options.SendDelay == nil {
+	if msgType == messageTypeKeyExchange || sess.options.SendDelay == nil {
 		var cipherKey []byte
-		if msgType != MessageType_keyExchange {
+		if msgType != messageTypeKeyExchange {
 			cipherKey = sess.GetCipherKeyWait()
 		}
 		n, err := sess.writeMessageSync(cipherKey, hdr, payload)
 		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 		sendInfo.N = n
 		sendInfo.Err = err
-		close(sendInfo.C)
+		close(sendInfo.c)
 		return
 	}
 
@@ -879,19 +992,19 @@ func (sess *Session) writeMessageAsync(
 	if sess.options.SendDelay == nil {
 		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 		sendInfo.N, sendInfo.Err = sess.writeMessageSync(sess.GetCipherKeyWait(), hdr, payload)
-		close(sendInfo.C)
+		close(sendInfo.c)
 		return
 	}
 
 	for {
 		shouldWaitForSend := false
-		sess.delayedWriteBufLockDo(0, func(delayedWriteBufLockID LockID, buf *Buffer) {
+		sess.delayedWriteBufLockDo(0, func(delayedWriteBufLockID lockID, buf *buffer) {
 			packetSize := messagesContainerHeadersSize + uint(len(buf.Bytes)) + messageHeadersSize + uint(len(payload))
 			if packetSize > uint(sess.GetMaxPacketSize()) {
 				if len(buf.Bytes) == 0 {
 					sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 					sendInfo.Err = newErrPayloadTooBig(uint(sess.GetMaxPacketSize()), packetSize)
-					close(sendInfo.C)
+					close(sendInfo.c)
 					return
 				}
 
@@ -920,11 +1033,11 @@ func (sess *Session) writeMessageAsync(
 			return
 		}
 
-		if !sendToSendDelayedNowChan() || sess.isDoneFast() {
+		if !sendToSendDelayedNowChan() || sess.isDone() {
 			sess.debugf("sess.sendDelayedNowChan is closed :(")
 			sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 			sendInfo.Err = newErrCanceled()
-			close(sendInfo.C)
+			close(sendInfo.c)
 			sess.sendDelayedCond.Broadcast()
 			return
 		}
@@ -934,7 +1047,7 @@ func (sess *Session) writeMessageAsync(
 			defer ticker.Stop()
 			for {
 				select {
-				case <-sendInfo.C:
+				case <-sendInfo.c:
 					return
 				case <-ticker.C:
 					// TODO: fix this:
@@ -951,34 +1064,32 @@ func (sess *Session) writeMessageAsync(
 			}
 		}()
 	}
-
-	return
 }
 
-func (sess *Session) delayedWriteBufRLockDo(fn func(b *Buffer)) {
-	sess.delayedWriteBufXLockDo(func(b *Buffer) error {
+func (sess *Session) delayedWriteBufRLockDo(fn func(b *buffer)) {
+	sess.delayedWriteBufXLockDo(func(b *buffer) error {
 		return b.RLockDo(func() {
 			fn(b)
 		})
 	})
 }
 
-func (sess *Session) delayedWriteBufLockDo(delayedWriteBufLockID LockID, fn func(LockID, *Buffer)) {
-	sess.delayedWriteBufXLockDo(func(b *Buffer) error {
-		return b.LockDo(delayedWriteBufLockID, func(lockID LockID) {
+func (sess *Session) delayedWriteBufLockDo(delayedWriteBufLockID lockID, fn func(lockID, *buffer)) {
+	sess.delayedWriteBufXLockDo(func(b *buffer) error {
+		return b.LockDo(delayedWriteBufLockID, func(lockID lockID) {
 			fn(lockID, b)
 		})
 	})
 }
 
-func (sess *Session) delayedWriteBufXLockDo(fn func(*Buffer) error) {
+func (sess *Session) delayedWriteBufXLockDo(fn func(*buffer) error) {
 	count := 0
 	for {
-		buf := (*Buffer)(atomic.LoadPointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.delayedWriteBuf))))
+		buf := (*buffer)(atomic.LoadPointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.delayedWriteBuf))))
 		if !buf.incRefCount() {
 			continue
 		}
-		bufCmp := (*Buffer)(atomic.LoadPointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.delayedWriteBuf))))
+		bufCmp := (*buffer)(atomic.LoadPointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.delayedWriteBuf))))
 		if buf != bufCmp {
 			buf.Release()
 			continue
@@ -988,7 +1099,7 @@ func (sess *Session) delayedWriteBufXLockDo(fn func(*Buffer) error) {
 		switch {
 		case err == nil:
 			return
-		case errors.As(err, &ErrMonopolized{}):
+		case errors.As(err, &errMonopolized{}):
 			count++
 			// Actually `100000` is too much. "1" or "2" should be enough.
 			// But just in case. See comments in `sendDelayedNow`.
@@ -1005,11 +1116,11 @@ func (sess *Session) delayedWriteBufXLockDo(fn func(*Buffer) error) {
 }
 
 func (sess *Session) appendToDelayedWriteBuffer(
-	delayedWriteBufLockID LockID,
+	delayedWriteBufLockID lockID,
 	hdr *messageHeaders,
 	payload []byte,
 ) (sendInfo *SendInfo) {
-	sess.delayedWriteBufLockDo(delayedWriteBufLockID, func(_ LockID, buf *Buffer) {
+	sess.delayedWriteBufLockDo(delayedWriteBufLockID, func(_ lockID, buf *buffer) {
 		startIdx := uint(len(buf.Bytes))
 		endIdx := uint(startIdx) + messageHeadersSize + uint(len(payload))
 		buf.Bytes = buf.Bytes[:endIdx]
@@ -1031,7 +1142,7 @@ func (sess *Session) appendToDelayedWriteBuffer(
 		sess.delayedSenderTimerLocker.LockDo(func() {
 			sess.delayedSenderTimer.Reset(*sess.options.SendDelay)
 		})
-		atomic.StoreUint64(&sess.lastSendInfoSendID, sendInfo.SendID)
+		atomic.StoreUint64(&sess.lastSendInfoSendID, sendInfo.sendID)
 
 		buf.MetadataVariableUInt++
 	})
@@ -1040,7 +1151,7 @@ func (sess *Session) appendToDelayedWriteBuffer(
 
 // this function couldn't be used concurrently
 func (sess *Session) sendDelayedNow(
-	delayedWriteBufLockID LockID,
+	delayedWriteBufLockID lockID,
 	isSync bool,
 ) uint64 {
 	sess.ifDebug(func() { sess.debugf(`sendDelayedNow(%v, %v)`, delayedWriteBufLockID, isSync) })
@@ -1067,7 +1178,7 @@ func (sess *Session) sendDelayedNow(
 	oldSendInfo, sess.delayedSendInfo = sess.delayedSendInfo, newSendInfo
 
 	// Atomic read is in `delayedWriteBufXLockDo`
-	buf := (*Buffer)(atomic.SwapPointer(
+	buf := (*buffer)(atomic.SwapPointer(
 		(*unsafe.Pointer)((unsafe.Pointer)(&sess.delayedWriteBuf)),
 		(unsafe.Pointer)(nextBuf)),
 	)
@@ -1081,12 +1192,12 @@ func (sess *Session) sendDelayedNow(
 		if len(buf.Bytes) > 0 {
 			oldSendInfo.N, oldSendInfo.Err = sess.sendDelayedNowSyncFromBuffer(buf)
 		}
-		close(oldSendInfo.C)
+		close(oldSendInfo.c)
 		oldSendInfo.Release()
 		buf.Release()
 	}
 
-	sendID := oldSendInfo.SendID
+	sendID := oldSendInfo.sendID
 	if isSync {
 		callSend()
 	} else {
@@ -1096,7 +1207,7 @@ func (sess *Session) sendDelayedNow(
 	return sendID
 }
 
-func (sess *Session) sendDelayedNowSyncFromBuffer(buf *Buffer) (int, error) {
+func (sess *Session) sendDelayedNowSyncFromBuffer(buf *buffer) (int, error) {
 	messagesBytes := buf.Bytes
 
 	cipherKey := sess.GetCipherKeyWait()
@@ -1152,14 +1263,14 @@ func (sess *Session) delayedSenderLoop() {
 			defer sendInfo.Release()
 			sess.debugf("delayedSenderLoop(): sendInfo := <-sess.sendDelayedNowChan: %+v; lastSendID == %v",
 				sendInfo, lastSendID)
-			if sendInfo.SendID == lastSendID {
+			if sendInfo.sendID == lastSendID {
 				return true
 			}
 		case <-sess.ctx.Done():
 			sess.debugf("delayedSenderLoop(): <-sess.ctx.Done()")
 			return false
 		case <-sess.delayedSenderTimer.C:
-			sess.debugf("delayedSenderLoop(): <-sess.delayedSenderTimer.C")
+			sess.debugf("delayedSenderLoop(): <-sess.delayedSenderTimer.c")
 		}
 
 		sendID := sess.sendDelayedNow(0, true)
@@ -1201,7 +1312,7 @@ func (sess *Session) sendMessages(
 		return 0, err
 	}
 
-	if sess.isDoneFast() {
+	if sess.isDone() {
 		return 0, newErrAlreadyClosed()
 	}
 
@@ -1267,27 +1378,37 @@ func (sess *Session) ifDebug(fn func()) {
 	fn()
 }
 
+func (sess *Session) ifInfo(fn func()) {
+	if !sess.options.EnableDebug {
+		return
+	}
+
+	fn()
+}
+
 func (sess *Session) debugf(format string, args ...interface{}) {
 	sess.ifDebug(func() {
 		defer func() { recover() }()
 		select {
-		case sess.debugOutputChan <- DebugOutputEntry{format: format, args: args}:
+		case sess.debugOutputChan <- DebugOutputEntry{Format: format, Args: deepcopy.Copy(args).([]interface{})}:
 		default:
 		}
 	})
 }
 
 func (sess *Session) infof(format string, args ...interface{}) {
-	defer func() { recover() }()
-	select {
-	case sess.infoOutputChan <- DebugOutputEntry{format: format, args: args}:
-	default:
-	}
+	sess.ifInfo(func() {
+		defer func() { recover() }()
+		select {
+		case sess.infoOutputChan <- DebugOutputEntry{Format: format, Args: deepcopy.Copy(args).([]interface{})}:
+		default:
+		}
+	})
 }
 
 func (sess *Session) startKeyExchange() {
-	switch sess.setState(SessionState_keyExchanging, SessionState_closing, SessionState_closed) {
-	case SessionState_keyExchanging, SessionState_closing, SessionState_closed:
+	switch sess.setState(SessionStateKeyExchanging, SessionStateClosing, SessionStateClosed) {
+	case SessionStateKeyExchanging, SessionStateClosing, SessionStateClosed:
 		return
 	}
 
@@ -1296,7 +1417,7 @@ func (sess *Session) startKeyExchange() {
 		sess.ctx,
 		sess.identity,
 		sess.remoteIdentity,
-		sess.NewMessenger(MessageType_keyExchange), func(secret []byte) {
+		sess.NewMessenger(messageTypeKeyExchange), func(secret []byte) {
 			// ok
 			sess.debugf("got key: %v", secret)
 			sess.setSecret(secret)
@@ -1305,9 +1426,9 @@ func (sess *Session) startKeyExchange() {
 				return
 			}
 
-			sess.setState(SessionState_established,
-				SessionState_closed, SessionState_closing,
-				SessionState_new, SessionState_established)
+			sess.setState(SessionStateEstablished,
+				SessionStateClosed, SessionStateClosing,
+				SessionStateNew, SessionStateEstablished)
 
 			sess.eventHandler.OnConnect(sess)
 
@@ -1360,7 +1481,7 @@ func (sess *Session) setSecret(newSecret []byte) {
 }
 
 func (sess *Session) read(p []byte) (int, error) {
-	ch := sess.ReadChan[MessageType_dataPacketType0]
+	ch := sess.ReadChan[MessageTypeDataPacketType0]
 	item := <-ch
 	if item == nil {
 		return -1, newErrAlreadyClosed()
@@ -1374,27 +1495,34 @@ func (sess *Session) read(p []byte) (int, error) {
 	return n, nil
 }
 
+// Read implements io.Reader
 func (sess *Session) Read(p []byte) (int, error) {
 	return sess.read(p)
 }
 
 func (sess *Session) write(raw []byte) (int, error) {
-	return sess.WriteMessage(MessageType_dataPacketType0, raw)
+	return sess.WriteMessage(MessageTypeDataPacketType0, raw)
 }
 
+// Write implements io.Writer
 func (sess *Session) Write(p []byte) (int, error) {
 	return sess.write(p)
 }
 
+// Close implements io.Closer. It will send a signal to close the session,
+// but it will return immediately (without waiting until everything will
+// finish).
 func (sess *Session) Close() error {
-
-	switch sess.setState(SessionState_closing) {
-	case SessionState_closed, SessionState_closing:
+	switch sess.setState(SessionStateClosing) {
+	case SessionStateClosed, SessionStateClosing:
 		return newErrAlreadyClosed()
 	}
 	sess.cancelFunc()
 	return nil
 }
+
+// CloseAndWait sends the signal to close to the Session and waits until
+// it will be done.
 func (sess *Session) CloseAndWait() error {
 	if err := sess.Close(); err != nil {
 		return wrapError(err)
@@ -1402,9 +1530,14 @@ func (sess *Session) CloseAndWait() error {
 	sess.WaitForClosure()
 	return nil
 }
+
+// WaitForClosure waits until the Session will be closed and will finish
+// everything.
 func (sess *Session) WaitForClosure() {
 	sess.stopWaitGroup.Wait()
 }
+
+// GetEphemeralKey just returns the last generated shared key
 func (sess *Session) GetEphemeralKey() []byte {
 	return sess.currentSecret
 }

@@ -4,7 +4,7 @@ import (
 	"sync"
 )
 
-type ReadItem struct {
+type readItem struct {
 	Data []byte
 
 	isBusy bool
@@ -19,7 +19,7 @@ func newReadItemPool() *readItemPool {
 	pool := &readItemPool{}
 	pool.storage = sync.Pool{
 		New: func() interface{} {
-			return &ReadItem{
+			return &readItem{
 				pool: pool,
 			}
 		},
@@ -27,8 +27,8 @@ func newReadItemPool() *readItemPool {
 	return pool
 }
 
-func (pool *readItemPool) AcquireReadItem(maxSize uint32) *ReadItem {
-	item := pool.storage.Get().(*ReadItem)
+func (pool *readItemPool) AcquireReadItem(maxSize uint32) *readItem {
+	item := pool.storage.Get().(*readItem)
 	if item.isBusy {
 		panic(`should not happened`)
 	}
@@ -39,7 +39,7 @@ func (pool *readItemPool) AcquireReadItem(maxSize uint32) *ReadItem {
 	return item
 }
 
-func (pool *readItemPool) Put(freeReadItem *ReadItem) {
+func (pool *readItemPool) Put(freeReadItem *readItem) {
 	if !freeReadItem.isBusy {
 		panic(`should not happened`)
 	}
@@ -49,6 +49,6 @@ func (pool *readItemPool) Put(freeReadItem *ReadItem) {
 
 }
 
-func (it *ReadItem) Release() {
+func (it *readItem) Release() {
 	it.pool.Put(it)
 }

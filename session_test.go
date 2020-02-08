@@ -1,4 +1,4 @@
-package secureio
+package secureio_test
 
 import (
 	"context"
@@ -13,6 +13,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/xaionaro-go/slice"
+	"github.com/xaionaro-go/unsafetools"
+
+	. "github.com/xaionaro-go/secureio"
 )
 
 func TestSessionBigWrite(t *testing.T) {
@@ -30,9 +33,9 @@ func TestSessionBigWrite(t *testing.T) {
 	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
 	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{t, nil}, opts)
 
-	writeBuf := make([]byte, maxPayloadSize)
+	writeBuf := make([]byte, sess0.GetMaxPayloadSize())
 	rand.Read(writeBuf)
-	readBuf := make([]byte, maxPayloadSize)
+	readBuf := make([]byte, sess0.GetMaxPayloadSize())
 
 	_, err := sess0.Write(writeBuf)
 	assert.NoError(t, err)
@@ -48,8 +51,8 @@ func TestSessionBigWrite(t *testing.T) {
 	sess0.WaitForClosure()
 	sess1.WaitForClosure()
 
-	assert.True(t, sess0.isDone())
-	assert.True(t, sess1.isDone())
+	assert.Equal(t, SessionStateClosed, sess0.GetState())
+	assert.Equal(t, SessionStateClosed, sess1.GetState())
 }
 
 func TestSessionWaitForSendInfo(t *testing.T) {
@@ -71,7 +74,7 @@ func TestSessionWaitForSendInfo(t *testing.T) {
 	rand.Read(writeBuf)
 	readBuf := make([]byte, 8)
 
-	sendInfo := sess0.WriteMessageAsync(MessageType_dataPacketType0, writeBuf)
+	sendInfo := sess0.WriteMessageAsync(MessageTypeDataPacketType0, writeBuf)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -82,7 +85,7 @@ func TestSessionWaitForSendInfo(t *testing.T) {
 		wg.Done()
 	}()
 
-	<-sendInfo.C
+	<-sendInfo.Done()
 	assert.NoError(t, sendInfo.Err)
 	sendInfo.Release()
 
@@ -95,8 +98,8 @@ func TestSessionWaitForSendInfo(t *testing.T) {
 	sess0.WaitForClosure()
 	sess1.WaitForClosure()
 
-	assert.True(t, sess0.isDone())
-	assert.True(t, sess1.isDone())
+	assert.Equal(t, SessionStateClosed, sess0.GetState())
+	assert.Equal(t, SessionStateClosed, sess1.GetState())
 }
 
 func TestSessionAsyncWrite(t *testing.T) {
@@ -117,17 +120,17 @@ func TestSessionAsyncWrite(t *testing.T) {
 
 	var wg sync.WaitGroup
 
-	writeBuf := make([]byte, maxPayloadSize/4)
+	writeBuf := make([]byte, sess0.GetMaxPayloadSize()/4)
 	rand.Read(writeBuf)
 
 	for i := 0; i < 10; i++ {
 		func() {
-			readBuf := make([]byte, maxPayloadSize/4)
+			readBuf := make([]byte, sess0.GetMaxPayloadSize()/4)
 
 			wg.Add(1)
 			go func() {
-				sendInfo := sess0.WriteMessageAsync(MessageType_dataPacketType0, writeBuf)
-				<-sendInfo.C
+				sendInfo := sess0.WriteMessageAsync(MessageTypeDataPacketType0, writeBuf)
+				<-sendInfo.Done()
 				assert.NoError(t, sendInfo.Err)
 				sendInfo.Release()
 				wg.Done()
@@ -152,8 +155,8 @@ func TestSessionAsyncWrite(t *testing.T) {
 	sess0.WaitForClosure()
 	sess1.WaitForClosure()
 
-	assert.True(t, sess0.isDone())
-	assert.True(t, sess1.isDone())
+	assert.Equal(t, SessionStateClosed, sess0.GetState())
+	assert.Equal(t, SessionStateClosed, sess1.GetState())
 }
 
 func TestSession_WriteMessageAsync_noHanging(t *testing.T) {
@@ -226,7 +229,7 @@ func benchmarkSessionWriteRead(
 				panic(fmt.Sprintf("%v: %v", pathErr.Path, pathErr.Err))
 			}
 			panic(err)
-			return false
+			//return false
 		})
 	}
 
@@ -276,7 +279,7 @@ func benchmarkSessionWriteRead(
 				select {
 				case <-ctx.Done():
 					return
-				case <-sendInfo.C:
+				case <-sendInfo.Done():
 				}
 				if sendInfo.Err != nil {
 					if !errors.As(sendInfo.Err, &ErrAlreadyClosed{}) && !errors.As(sendInfo.Err, &ErrCanceled{}) {
@@ -287,7 +290,7 @@ func benchmarkSessionWriteRead(
 			}
 		}()
 
-		sess1.SetHandlerFuncs(MessageType_dataPacketType0,
+		sess1.SetHandlerFuncs(MessageTypeDataPacketType0,
 			nil,
 			func(err error) {
 				panic(err)
@@ -306,12 +309,12 @@ func benchmarkSessionWriteRead(
 		if shouldWriteAsMessage {
 			if isSync {
 				_, err = sess0.WriteMessage(
-					MessageType_dataPacketType0,
+					MessageTypeDataPacketType0,
 					writeBuf,
 				)
 			} else {
 				sendInfo = sess0.WriteMessageAsync(
-					MessageType_dataPacketType0,
+					MessageTypeDataPacketType0,
 					writeBuf,
 				)
 			}
@@ -362,9 +365,9 @@ func TestHackerDuplicateMessage(t *testing.T) {
 	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
 	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{t, nil}, opts)
 
-	writeBuf := make([]byte, maxPayloadSize)
+	writeBuf := make([]byte, sess0.GetMaxPayloadSize())
 	rand.Read(writeBuf)
-	readBuf := make([]byte, maxPayloadSize)
+	readBuf := make([]byte, sess0.GetMaxPayloadSize())
 
 	// Now a hacker appears, listens a message in the middle a repeats it.
 	// A secureio client should ignore the duplicate
@@ -375,7 +378,7 @@ func TestHackerDuplicateMessage(t *testing.T) {
 	// the next message. So we will be able to read from `conn1` to
 	// intercept a message.
 	for !sess1.SetPause(true) {
-		sess1.WaitForState(SessionState_established)
+		sess1.WaitForState(ctx, SessionStateEstablished)
 	}
 
 	// The next message:
@@ -430,17 +433,17 @@ func TestHackerDuplicateMessage(t *testing.T) {
 		_, err = sess1.Read(readBuf)
 		assert.NoError(t, err)
 
-		if !assert.Equal(t, uint64(1), sess1.unexpectedPacketIDCount) {
+		if !assert.Equal(t, uint64(1), sess1.GetUnexpectedPacketIDCount()) {
 			// Unblocking the goroutine below (with `runtime.Gosched()`)
 			// if required.
-			sess1.unexpectedPacketIDCount = 1
+			*unsafetools.FieldByName(sess1, `unexpectedPacketIDCount`).(*uint64) = 1
 		}
 	}()
 
 	successfullyIgnoredTheDuplicate := false
-	assert.Equal(t, uint64(0), sess1.unexpectedPacketIDCount)
+	assert.Equal(t, uint64(0), sess1.GetUnexpectedPacketIDCount())
 	go func() {
-		for sess1.unexpectedPacketIDCount == 0 {
+		for sess1.GetUnexpectedPacketIDCount() == 0 {
 			runtime.Gosched()
 		}
 		successfullyIgnoredTheDuplicate = true
@@ -456,7 +459,7 @@ func TestHackerDuplicateMessage(t *testing.T) {
 
 	// Disabling the defensive mechanism and trying again,
 	// now we should receive the duplicate:
-	sess1.options.AllowReorderingAndDuplication = true
+	unsafetools.FieldByName(sess1, `options`).(*SessionOptions).AllowReorderingAndDuplication = true
 
 	_, err = conn0.Write(interceptedMessage)
 	assert.NoError(t, err)
@@ -475,6 +478,6 @@ func TestHackerDuplicateMessage(t *testing.T) {
 	sess0.WaitForClosure()
 	sess1.WaitForClosure()
 
-	assert.True(t, sess0.isDone())
-	assert.True(t, sess1.isDone())
+	assert.Equal(t, SessionStateClosed, sess0.GetState())
+	assert.Equal(t, SessionStateClosed, sess1.GetState())
 }

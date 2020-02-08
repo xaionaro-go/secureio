@@ -1,100 +1,116 @@
 package secureio
 
 import (
-	mathRand "math/rand"
+	"context"
 	"sync/atomic"
-	"time"
 )
 
+// SessionState is the state of a Session. It describes
+// what's going on right now with the Session.
 type SessionState uint64
 
 const (
-	SessionState_new = SessionState(iota)
-	SessionState_closed
-	SessionState_keyExchanging
-	SessionState_established
-	SessionState_paused
-	SessionState_closing
-	sessionState_inTransition
+	// SessionStateNew means the Session was just created and even
+	// did not start it's routines.
+	SessionStateNew = SessionState(iota)
+
+	// SessionStateClosed means the session is already deattached from
+	// the backend io.ReadWriteCloser, closed and cannot be used anymore.
+	SessionStateClosed
+
+	// SessionStateKeyExchanging is the state which follows after
+	// SessionStateNew. it means the Session started it's routines
+	// (including the key exchanger routine), but not yet successfully
+	// exchanged with keys (at least once).
+	SessionStateKeyExchanging
+
+	// SessionStateEstablished means the Session successfully exchanged
+	// with keys and currently operational.
+	SessionStateEstablished
+
+	// SessionStatePaused means the Session was temporary detached from
+	// the backend io.ReadWriteCloser by method `(*Session).SetPause`.
+	SessionStatePaused
+
+	// SessionStateClosing is a transition state to SessionStateClosed
+	SessionStateClosing
+
+	sessionStateInTransition
 )
+
+type sessionStateStorage struct {
+	SessionState
+
+	changeChan       chan struct{}
+	changeChanLocker lockerRWMutex
+}
+
+func newSessionStateStorage() *sessionStateStorage {
+	return &sessionStateStorage{
+		SessionState: SessionStateNew,
+		changeChan:   make(chan struct{}),
+	}
+}
 
 func (state SessionState) String() string {
 	switch state {
-	case SessionState_new:
+	case SessionStateNew:
 		return `new`
-	case SessionState_closed:
+	case SessionStateClosed:
 		return `closed`
-	case SessionState_keyExchanging:
+	case SessionStateKeyExchanging:
 		return `key_exchanging`
-	case SessionState_established:
+	case SessionStateEstablished:
 		return `established`
-	case SessionState_paused:
+	case SessionStatePaused:
 		return `paused`
-	case SessionState_closing:
+	case SessionStateClosing:
 		return `closing`
-	case sessionState_inTransition:
+	case sessionStateInTransition:
 		return `in_transition`
 	}
 	return `unknown`
 }
 
-func randSleep() {
-	time.Sleep(time.Microsecond * time.Duration(mathRand.Intn(100)))
-}
-
-func (state *SessionState) WaitFor(states ...SessionState) SessionState {
+func (stateStor *sessionStateStorage) WaitFor(ctx context.Context, states ...SessionState) SessionState {
 	for {
-		loadedState := state.Get()
+		var changeChan chan struct{}
+		stateStor.changeChanLocker.RLockDo(func() {
+			changeChan = stateStor.changeChan
+		})
+		loadedState := stateStor.Load()
 		for i := 0; i < len(states); i++ {
 			if loadedState == states[i] {
 				return loadedState
 			}
 		}
-		randSleep()
+		select {
+		case <-ctx.Done():
+			return loadedState
+		case <-changeChan:
+		}
 	}
 }
 
+// Load atomically returns the currents state
 func (state *SessionState) Load() SessionState {
 	return SessionState(atomic.LoadUint64((*uint64)(state)))
 }
 
-func (state *SessionState) Get() (loadedState SessionState) {
-	for {
-		loadedState = SessionState(atomic.LoadUint64((*uint64)(state)))
-		if loadedState != sessionState_inTransition {
-			return
-		}
-		randSleep()
-	}
-}
+func (stateStor *sessionStateStorage) Set(newState SessionState, cancelOnStates ...SessionState) (oldState SessionState) {
+	stateStor.changeChanLocker.LockDo(func() {
+		oldState = stateStor.Load()
 
-func (state *SessionState) Set(newState SessionState, cancelOnStates ...SessionState) (oldState SessionState) {
-	// Temporary changing the state to "inTransition"
-	for {
-		oldState = SessionState(atomic.SwapUint64((*uint64)(state), uint64(sessionState_inTransition)))
-		if oldState != sessionState_inTransition {
-			break
-		}
-		randSleep()
-	}
-
-	// Canceling if required
-	for i := 0; i < len(cancelOnStates); i++ {
-		if oldState == cancelOnStates[i] {
-			for {
-				if atomic.CompareAndSwapUint64((*uint64)(state), uint64(sessionState_inTransition), uint64(oldState)) {
-					return
-				}
-				randSleep()
+		for i := 0; i < len(cancelOnStates); i++ {
+			if oldState == cancelOnStates[i] {
+				return
 			}
 		}
-	}
 
-	// Setting the new state
-	for {
-		if atomic.CompareAndSwapUint64((*uint64)(state), uint64(sessionState_inTransition), uint64(newState)) {
-			return
-		}
-		randSleep()
-	}
+		atomic.StoreUint64((*uint64)(&stateStor.SessionState), uint64(newState))
+
+		close(stateStor.changeChan)
+		stateStor.changeChan = make(chan struct{})
+	})
+	return
 }
