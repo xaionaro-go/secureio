@@ -3,6 +3,12 @@
 
 # Quick start
 
+Prepare keys (on both sides):
+```sh
+[ -f ~/.ssh/id_ed25519 ] && [ -f ~/.ssh/id_ed25519.pub ] || ssh-keygen -t ed25519
+scp ~/.ssh/id_ed25519.pub remote:from_remote_side/
+```
+
 Encrypted `io.WriteReadCloser`, easy:
 
 ```go
@@ -10,7 +16,7 @@ Encrypted `io.WriteReadCloser`, easy:
 identity, err := secureio.NewIdentity(`/home/user/.ssh`)
 
 // Read remote identity 
-remoteIdentity, err := secureio.NewRemoteIdentityFromPublicKey(`/home/user/.somedir/remote.pubkey`)
+remoteIdentity, err := secureio.NewRemoteIdentityFromPublicKey(`/home/user/from_remote_side/id_ed25519.pub`)
 
 // Create a connection
 conn, err := net.Dial("udp", "10.0.0.2:1234")
