@@ -58,7 +58,6 @@ type Identity struct {
 //
 // * Parses ED25519 keys from directory `keysDir` if they exists
 // and creates a new instance of `*Identity`.
-// 
 // * Creates ED25510 keys and saves them to the directory `keysDir` if they
 // does not exist there and creates a new instance of `*Identity`.
 //
