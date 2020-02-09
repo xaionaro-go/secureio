@@ -14,6 +14,7 @@ import (
 
 	"github.com/aead/chacha20/chacha"
 	"github.com/mohae/deepcopy"
+	xerrors "github.com/xaionaro-go/errors"
 	"golang.org/x/crypto/poly1305"
 )
 
@@ -511,7 +512,7 @@ func (sess *Session) readerLoop() {
 				return
 			}
 			if !sess.eventHandler.Error(sess,
-				wrapErrorf("unable to read from the backend (state == %v): %w",
+				xerrors.Errorf("unable to read from the backend (state == %v): %w",
 					sess.state.Load(), err,
 				),
 			) {
@@ -536,7 +537,7 @@ func (sess *Session) readerLoop() {
 		})
 
 		if err != nil {
-			err = wrapErrorf("unable to decrypt: %w", err)
+			err = xerrors.Errorf("unable to decrypt: %w", err)
 			sess.infof("%v", err)
 			sequentialDecryptFailsCount := atomic.AddUint64(&sess.sequentialDecryptFailsCount, 1)
 			if sess.options.ErrorOnSequentialDecryptFailsCount != nil {
@@ -590,7 +591,7 @@ func (sess *Session) processIncomingMessages(
 		}
 		_, err := hdr.Read(messagesBytes[i : i+messageHeadersSize])
 		if err != nil {
-			sess.eventHandler.Error(sess, wrapErrorf("unable to read a header: %w", err))
+			sess.eventHandler.Error(sess, xerrors.Errorf("unable to read a header: %w", err))
 			return
 		}
 		if l-i < messageHeadersSize+uint(hdr.Length) {
@@ -620,7 +621,7 @@ func (sess *Session) processIncomingMessages(
 func (sess *Session) processIncomingMessage(hdr *messageHeadersData, payload []byte) {
 	if sess.messenger[hdr.Type] != nil {
 		if err := sess.messenger[hdr.Type].handle(payload[:hdr.Length]); err != nil {
-			sess.eventHandler.Error(sess, wrapErrorf("unable to handle a message: %w", err))
+			sess.eventHandler.Error(sess, xerrors.Errorf("unable to handle a message: %w", err))
 		}
 		return
 	}
@@ -695,7 +696,7 @@ func (sess *Session) decrypt(
 				err, &containerHdr.messagesContainerHeadersData, decrypted.Len(), decrypted.Cap(), decrypted.Offset)
 		})
 		if err != nil {
-			return false, wrapErrorf("unable to read a decrypted header: %w", err)
+			return false, xerrors.Errorf("unable to read a decrypted header: %w", err)
 		}
 
 		err = sess.checkHeadersChecksum(cipherKey, containerHdr)
@@ -739,7 +740,7 @@ func (sess *Session) checkHeadersChecksum(cipherKey []byte, containerHdr *messag
 	containerHdr.CalculateHeadersChecksumTo(cipherKey, &calculatedChecksum)
 
 	if bytes.Compare(calculatedChecksum[:], containerHdr.ContainerHeadersChecksum[:]) != 0 {
-		return wrapErrorf(
+		return xerrors.Errorf(
 			"checkHeadersChecksum: %+v %v: %w",
 			containerHdr.messagesContainerHeadersData, containerHdr.Length,
 			newErrInvalidChecksum(containerHdr.ContainerHeadersChecksum[:], calculatedChecksum[:]),
@@ -754,7 +755,7 @@ func (sess *Session) checkMessagesChecksum(cipherKey []byte, containerHdr *messa
 	containerHdr.CalculateMessagesChecksumTo(cipherKey, &calculatedChecksum, messagesBytes)
 
 	if bytes.Compare(calculatedChecksum[:], containerHdr.MessagesChecksum[:]) != 0 {
-		return wrapErrorf(
+		return xerrors.Errorf(
 			"checkMessagesChecksum: %+v %v: %w",
 			containerHdr.messagesContainerHeadersData, containerHdr.Length,
 			newErrInvalidChecksum(containerHdr.MessagesChecksum[:], calculatedChecksum[:]),
@@ -812,7 +813,7 @@ func (h *handlerByFuncs) Handle(b []byte) error {
 	}
 	err := h.HandleFunc(b)
 	if err != nil {
-		return wrapErrorf("an error from h.HandleFunc(): %w", err)
+		return xerrors.Errorf("an error from h.HandleFunc(): %w", err)
 	}
 	return err
 }

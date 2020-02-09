@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aead/ecdh"
+	xerrors "github.com/xaionaro-go/errors"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -235,7 +236,7 @@ func (kx *keyExchanger) iterate() {
 	err := kx.sendPublicKey()
 	if err != nil {
 		_ = kx.Close()
-		kx.errFunc(wrapErrorf("unable to send a public key: %w", err))
+		kx.errFunc(xerrors.Errorf("unable to send a public key: %w", err))
 		return
 	}
 }
@@ -266,7 +267,7 @@ func (kx *keyExchanger) UpdateKey() {
 	privKey, pubKey, err := kx.ecdh.GenerateKey(rand.Reader)
 	if err != nil {
 		_ = kx.Close()
-		kx.errFunc(wrapErrorf("unable to generate ECDH keys: %w", err))
+		kx.errFunc(xerrors.Errorf("unable to generate ECDH keys: %w", err))
 		return
 	}
 	privKeyCasted := privKey.([curve25519PrivateKeySize]byte)
@@ -281,7 +282,7 @@ func (kx *keyExchanger) UpdateKey() {
 func (kx *keyExchanger) send(msg *keySeedUpdateMessage) error {
 	err := binary.Write(kx.messenger, binaryOrderType, msg)
 	if err != nil {
-		return wrapErrorf("unable to send keySeedUpdateMessage: %w", err)
+		return xerrors.Errorf("unable to send keySeedUpdateMessage: %w", err)
 	}
 	return nil
 }

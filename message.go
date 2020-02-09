@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	xerrors "github.com/xaionaro-go/errors"
 	"github.com/xaionaro-go/slice"
 	"github.com/xaionaro-go/unsafetools"
 	"golang.org/x/crypto/poly1305"
@@ -381,14 +382,14 @@ func (containerHdr *messagesContainerHeadersData) WriteTo(w io.Writer) (int64, e
 
 	n0, err := containerHdr.Write(buf)
 	if err != nil {
-		return int64(n0), wrapErrorf(
+		return int64(n0), xerrors.Errorf(
 			"unable to write the headers' data to a buffer: %w", err,
 		)
 	}
 
 	n1, err := w.Write(buf)
 	if err != nil {
-		return int64(n1), wrapErrorf(
+		return int64(n1), xerrors.Errorf(
 			"unable to write headers' data from a buffer to a writer: %w", err,
 		)
 	}

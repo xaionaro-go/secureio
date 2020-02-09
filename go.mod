@@ -8,7 +8,7 @@ require (
 	github.com/mohae/deepcopy v0.0.0-20170929034955-c48cc78d4826
 	github.com/stretchr/testify v1.4.0
 	github.com/valyala/fastrand v1.0.0 // indirect
-	github.com/xaionaro-go/errors v0.0.0-20190916174248-7fdd0a656b3c
+	github.com/xaionaro-go/errors v0.0.0-20200209154903-9fc7351b94d5
 	github.com/xaionaro-go/rand v0.0.0-20191005105903-aba1befc54a5
 	github.com/xaionaro-go/slice v0.0.0-20200126131228-455c082ffedb
 	github.com/xaionaro-go/unsafetools v0.0.0-20200202162159-021b112c4d30

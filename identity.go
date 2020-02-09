@@ -11,6 +11,8 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+
+	xerrors "github.com/xaionaro-go/errors"
 )
 
 const (
@@ -123,7 +125,7 @@ func (i *Identity) savePrivateKey(keysDir string) error {
 func saveKeyToPemFile(keyType string, key []byte, filePath string) error {
 	keyFile, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE, 0600)
 	if err != nil {
-		return wrapErrorf("unable to open file: %w", err)
+		return xerrors.Errorf("unable to open file: %w", err)
 	}
 
 	keyBlock := pem.Block{
@@ -134,7 +136,7 @@ func saveKeyToPemFile(keyType string, key []byte, filePath string) error {
 
 	err = pem.Encode(keyFile, &keyBlock)
 	if err != nil {
-		return wrapErrorf("pem.Encode() returned an error: %w", err)
+		return xerrors.Errorf("pem.Encode() returned an error: %w", err)
 	}
 
 	return nil
@@ -144,14 +146,14 @@ func (i *Identity) generateAndSaveKeys(keysDir string) error {
 	var err error
 	i.Keys.Public, i.Keys.Private, err = ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return wrapErrorf("cannot generate keys: %w", err)
+		return xerrors.Errorf("cannot generate keys: %w", err)
 	}
 	err = i.savePrivateKey(keysDir)
 	if err == nil {
 		err = i.savePublicKey(keysDir)
 	}
 	if err != nil {
-		return wrapErrorf("cannot save keys: %w", err)
+		return xerrors.Errorf("cannot save keys: %w", err)
 	}
 	return nil
 }
@@ -159,7 +161,7 @@ func (i *Identity) generateAndSaveKeys(keysDir string) error {
 func loadPublicKeyFromFile(keyPtr *ed25519.PublicKey, path string) error {
 	keyBytes, err := ioutil.ReadFile(path)
 	if err != nil {
-		return wrapErrorf("unable to read key: %w", err)
+		return xerrors.Errorf("unable to read key: %w", err)
 	}
 
 	block, _ := pem.Decode(keyBytes)
@@ -173,7 +175,7 @@ func loadPublicKeyFromFile(keyPtr *ed25519.PublicKey, path string) error {
 func loadPrivateKeyFromFile(keyPtr *ed25519.PrivateKey, path string) error {
 	keyBytes, err := ioutil.ReadFile(path)
 	if err != nil {
-		return wrapErrorf("unable to read file: %w", err)
+		return xerrors.Errorf("unable to read file: %w", err)
 	}
 
 	block, _ := pem.Decode(keyBytes)
@@ -187,7 +189,7 @@ func loadPrivateKeyFromFile(keyPtr *ed25519.PrivateKey, path string) error {
 func (i *Identity) loadKeys(keysDir string) error {
 	err := loadPrivateKeyFromFile(&i.Keys.Private, filepath.Join(keysDir, privateFileName))
 	if err != nil {
-		return wrapErrorf("Cannot load the private key: %w", err)
+		return xerrors.Errorf("Cannot load the private key: %w", err)
 	}
 	i.Keys.Public = i.Keys.Private.Public().(ed25519.PublicKey)
 	return nil
@@ -196,7 +198,7 @@ func (i *Identity) loadKeys(keysDir string) error {
 func (i *Identity) prepareKeys(keysDir string) error {
 	err := os.MkdirAll(keysDir, os.FileMode(0700))
 	if err != nil {
-		return wrapErrorf(`cannot create the directory "%s": %w`, keysDir, err)
+		return xerrors.Errorf(`cannot create the directory "%s": %w`, keysDir, err)
 	}
 	if _, err := os.Stat(filepath.Join(keysDir, privateFileName)); os.IsNotExist(err) {
 		return i.generateAndSaveKeys(keysDir)
@@ -285,22 +287,22 @@ func (i *Identity) MutualConfirmationOfIdentity(
 
 	n, err := sess.Write(i.Keys.Public)
 	if err != nil {
-		xerr = wrapErrorf(`unable to write via a session: %w`, err)
+		xerr = xerrors.Errorf(`unable to write via a session: %w`, err)
 		return
 	}
 	if n != len(i.Keys.Public) {
-		xerr = wrapErrorf(`unable to send my public key: %w`, newErrPartialWrite())
+		xerr = xerrors.Errorf(`unable to send my public key: %w`, newErrPartialWrite())
 		return
 	}
 
 	remotePubKey := make([]byte, len(remoteIdentity.Keys.Public))
 	n, err = sess.Read(remotePubKey)
 	if err != nil {
-		xerr = wrapErrorf(`unable to read data via session: %w`, err)
+		xerr = xerrors.Errorf(`unable to read data via session: %w`, err)
 		return
 	}
 	if decryptError != nil {
-		xerr = wrapErrorf(`unable to decrypt: %w`, decryptError)
+		xerr = xerrors.Errorf(`unable to decrypt: %w`, decryptError)
 		return
 	}
 	if n != len(i.Keys.Public) {

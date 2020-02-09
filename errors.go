@@ -2,34 +2,11 @@ package secureio
 
 import (
 	"fmt"
-	"strings"
+
+	"golang.org/x/crypto/poly1305"
 
 	"github.com/xaionaro-go/errors"
-	"golang.org/x/crypto/poly1305"
 )
-
-func wrapErrorf(format string, args ...interface{}) error {
-	errI := args[len(args)-1]
-	err, _ := errI.(error)
-	if errI != nil && err == nil {
-		return nil // nil error, nothing to wrap
-	}
-
-	if err == nil {
-		return errors.New(fmt.Errorf(format, args...))
-	}
-	args = args[:len(args)-1]
-
-	var parentErr error
-	if strings.HasSuffix(format, ": %w") {
-		parentErr = fmt.Errorf(format[:len(format)-4], args...)
-	} else {
-		parentErr = fmt.Errorf(format, args...)
-	}
-	parentErrForWrap := errors.New(parentErr)
-	parentErrForWrap.Traceback = nil
-	return errors.Wrap(err, parentErrForWrap)
-}
 
 func wrapError(err error) error {
 	if err == nil {
