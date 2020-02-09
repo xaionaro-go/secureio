@@ -116,43 +116,13 @@ const (
 )
 
 func (t MessageType) String() string {
-	switch t {
-	case messageTypeUndefined:
+	switch {
+	case t == messageTypeUndefined:
 		return `undefined`
-	case messageTypeKeyExchange:
+	case t == messageTypeKeyExchange:
 		return `key_exchange`
-	case MessageTypeDataPacketType0:
-		return `datatype0`
-	case MessageTypeDataPacketType1:
-		return `datatype1`
-	case MessageTypeDataPacketType2:
-		return `datatype2`
-	case MessageTypeDataPacketType3:
-		return `datatype3`
-	case MessageTypeDataPacketType4:
-		return `datatype4`
-	case MessageTypeDataPacketType5:
-		return `datatype5`
-	case MessageTypeDataPacketType6:
-		return `datatype6`
-	case MessageTypeDataPacketType7:
-		return `datatype7`
-	case MessageTypeDataPacketType8:
-		return `datatype8`
-	case MessageTypeDataPacketType9:
-		return `datatype9`
-	case MessageTypeDataPacketType10:
-		return `datatype10`
-	case MessageTypeDataPacketType11:
-		return `datatype11`
-	case MessageTypeDataPacketType12:
-		return `datatype12`
-	case MessageTypeDataPacketType13:
-		return `datatype13`
-	case MessageTypeDataPacketType14:
-		return `datatype14`
-	case MessageTypeDataPacketType15:
-		return `datatype15`
+	case t >= MessageTypeDataPacketType0 || t <= MessageTypeDataPacketType15:
+		return fmt.Sprintf(`datatype%d`, uint8(t-MessageTypeDataPacketType0))
 	}
 	return `unknown`
 }

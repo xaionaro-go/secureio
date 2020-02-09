@@ -13,13 +13,15 @@ func TestEncryptDecrypt(t *testing.T) {
 
 	key := make([]byte, chacha.KeySize)
 	_, err := rand.Read(key)
+	assert.NoError(t, err)
 
 	iv := make([]byte, ivSize)
 	_, err = rand.Read(iv)
-
 	assert.NoError(t, err)
+
 	plainBytes := make([]byte, 65534)
 	_, err = rand.Read(plainBytes)
+	assert.NoError(t, err)
 
 	encryptedBytes := make([]byte, 65536)
 	encrypt(key, iv, encryptedBytes, plainBytes)
