@@ -55,10 +55,12 @@ type Identity struct {
 
 // NewIdentity is a constructor for `Identity` based on the path
 // to ED25519 keys. It:
+//
 // * Parses ED25519 keys from directory `keysDir` if they exists
-//   and creates a new instance of `*Identity`.
+// and creates a new instance of `*Identity`.
+// 
 // * Creates ED25510 keys and saves them to the directory `keysDir` if they
-//   does not exist there and creates a new instance of `*Identity`.
+// does not exist there and creates a new instance of `*Identity`.
 //
 // File names in the directory are `id_ed25519` and `id_ed25519.pub`.
 //
