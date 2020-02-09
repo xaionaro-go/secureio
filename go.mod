@@ -13,7 +13,8 @@ require (
 	github.com/xaionaro-go/slice v0.0.0-20200126131228-455c082ffedb
 	github.com/xaionaro-go/unsafetools v0.0.0-20200202162159-021b112c4d30
 	gitlab.com/NebulousLabs/fastrand v0.0.0-20181126182046-603482d69e40 // indirect
-	golang.org/x/crypto v0.0.0-20191011191535-87dc89f01550
+	golang.org/x/crypto v0.0.0-20200208060501-ecb85df21340
+	golang.org/x/sys v0.0.0-20200202164722-d101bd2416d5 // indirect
 	lukechampine.com/blake3 v1.0.0
 	lukechampine.com/frand v1.1.0 // indirect
 )
