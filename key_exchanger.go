@@ -3,6 +3,7 @@ package secureio
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -10,7 +11,6 @@ import (
 	"time"
 
 	"github.com/aead/ecdh"
-	"golang.org/x/crypto/ed25519"
 	"golang.org/x/crypto/sha3"
 )
 
