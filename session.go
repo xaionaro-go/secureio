@@ -100,6 +100,8 @@ type Session struct {
 	infoOutputChan  chan DebugOutputEntry
 	debugOutputChan chan DebugOutputEntry
 
+	nextPacketID uint64
+
 	pauseLocker sync.Mutex
 	isReading   uint64
 }
@@ -469,7 +471,7 @@ func (sess *Session) setIsReading(v bool) {
 
 func (sess *Session) readerLoop() {
 	defer func() {
-		sess.debugf("\n/readerLoop: %v %v", sess.state.Load(), sess.isDoneSlow())
+		sess.debugf("/readerLoop: %v %v", sess.state.Load(), sess.isDoneSlow())
 
 		sess.cancelFunc()
 
@@ -609,8 +611,12 @@ func (sess *Session) processIncomingMessages(
 			messagesBytes[i+messageHeadersSize:i+messageHeadersSize+uint(hdr.Length)])
 
 		if receivedMessagesCount > 0 && receivedMessagesCount >= sess.options.DetachOnMessagesCount {
-			sess.debugf(`reached limit "DetachOnMessagesCount". Last hdr == %v`, hdr)
-			_ = sess.Close()
+			if sess.GetState() == SessionStateKeyExchanging && sess.keyExchanger.options.AnswersMode == KeyExchangeAnswersModeAnswerAndWait {
+				sess.debugf(`reached limit "DetachOnMessagesCount". Last hdr == %v. But cannot detach (waiting for key-exchange answer, see AnswersMode).`, hdr)
+			} else {
+				sess.debugf(`reached limit "DetachOnMessagesCount". Last hdr == %v`, hdr)
+				_ = sess.Close()
+			}
 			return
 		}
 
@@ -659,7 +665,7 @@ func (sess *Session) decrypt(
 		return
 	}
 
-	containerHdr = sess.messagesContainerHeadersPool.AcquireMessagesContainerHeaders()
+	containerHdr = sess.messagesContainerHeadersPool.AcquireMessagesContainerHeaders(sess)
 
 	// copying the IV (it's not encrypted)
 	_, err = containerHdr.PacketID.Read(encrypted)
@@ -964,7 +970,7 @@ func (sess *Session) writeMessageSync(
 
 	copy(buf.Bytes[messageHeadersSize:], payload)
 
-	containerHdr := sess.messagesContainerHeadersPool.AcquireMessagesContainerHeaders()
+	containerHdr := sess.messagesContainerHeadersPool.AcquireMessagesContainerHeaders(sess)
 	err = containerHdr.Set(cipherKey, buf.Bytes)
 	if err != nil {
 		return -1, wrapError(err)
@@ -1214,7 +1220,7 @@ func (sess *Session) sendDelayedNowSyncFromBuffer(buf *buffer) (int, error) {
 
 	cipherKey := sess.GetCipherKeyWait()
 
-	containerHdr := sess.messagesContainerHeadersPool.AcquireMessagesContainerHeaders()
+	containerHdr := sess.messagesContainerHeadersPool.AcquireMessagesContainerHeaders(sess)
 	err := containerHdr.Set(cipherKey, messagesBytes)
 	if err != nil {
 		return -1, wrapError(err)
@@ -1423,10 +1429,20 @@ func (sess *Session) startKeyExchange() {
 		sess.ctx,
 		sess.identity,
 		sess.remoteIdentity,
-		sess.NewMessenger(messageTypeKeyExchange), func(secret []byte) {
-			// ok
-			sess.debugf("got key: %v", secret)
-			sess.setSecret(secret)
+		sess.NewMessenger(messageTypeKeyExchange),
+		func(secret []byte) {
+			// set secret function
+
+			if !sess.setSecret(secret) {
+				// The same key as it was. Nothing to do.
+				sess.debugf("got key: the same as it was: %v", secret)
+				return
+			}
+
+			sess.debugf("got key: new key: %v", secret)
+		},
+		func() {
+			// "done" function
 
 			if atomic.AddUint64(&keyExchangeCount, 1) != 1 {
 				return
@@ -1465,12 +1481,16 @@ func (sess *Session) setMessenger(msgType MessageType, messenger *Messenger) {
 	})
 }
 
-func (sess *Session) setSecret(newSecret []byte) {
+func (sess *Session) setSecret(newSecret []byte) (result bool) {
 	sess.LockDo(func() {
-		atomic.SwapPointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.previousCipherKey)), (unsafe.Pointer)(sess.cipherKey))
 		sess.currentSecret = newSecret
 		newCipherKey := newSecret[:chacha.KeySize]
-		atomic.SwapPointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.cipherKey)), (unsafe.Pointer)(&newCipherKey))
+		previousCipherKey := atomic.SwapPointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.cipherKey)), (unsafe.Pointer)(&newCipherKey))
+		if bytes.Compare(newCipherKey, *(*[]byte)(previousCipherKey)) == 0 {
+			return
+		}
+
+		atomic.SwapPointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.previousCipherKey)), previousCipherKey)
 
 		// check if sess.waitForCipherKeyChan is already closed
 		select {
@@ -1483,7 +1503,10 @@ func (sess *Session) setSecret(newSecret []byte) {
 
 		// it not closed, yet? OK, close it:
 		close(sess.waitForCipherKeyChan)
+		result = true
 	})
+
+	return
 }
 
 func (sess *Session) read(p []byte) (int, error) {

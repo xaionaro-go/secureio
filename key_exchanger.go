@@ -11,8 +11,9 @@ import (
 	"time"
 
 	"github.com/aead/ecdh"
-	xerrors "github.com/xaionaro-go/errors"
 	"golang.org/x/crypto/sha3"
+
+	xerrors "github.com/xaionaro-go/errors"
 )
 
 const (
@@ -23,6 +24,10 @@ const (
 	// the request) for a response to request to exchange keys before
 	// consider the situation erroneous.
 	DefaultKeyExchangeTimeout = time.Minute
+
+	// DefaultKeyExchangeRetryInterval defines the default value of
+	// KeyExchangerOptions.RetryInterval.
+	DefaultKeyExchangeRetryInterval = time.Second
 )
 
 const (
@@ -50,11 +55,12 @@ var (
 type keyExchanger struct {
 	locker sync.Mutex
 
-	ctx        context.Context
-	cancelFunc func()
-	okFunc     func([]byte)
-	errFunc    func(error)
-	options    KeyExchangerOptions
+	ctx           context.Context
+	cancelFunc    func()
+	setSecretFunc func([]byte)
+	doneFunc      func()
+	errFunc       func(error)
+	options       KeyExchangerOptions
 
 	failCount                  uint
 	lastExchangeTS             time.Time
@@ -62,7 +68,6 @@ type keyExchanger struct {
 	nextLocalPrivateKey        *[curve25519PrivateKeySize]byte
 	nextLocalPublicKey         *[curve25519PublicKeySize]byte
 	remoteKeySeedUpdateMessage keySeedUpdateMessage
-	localKeySeedUpdateMessage  keySeedUpdateMessage
 	localIdentity              *Identity
 	remoteIdentity             *Identity
 	messenger                  *Messenger
@@ -82,6 +87,13 @@ type KeyExchangerOptions struct {
 	// If a zero-value then DefaultKeyExchangeInterval is used.
 	Interval time.Duration
 
+	// RetryInterval defines the maximal delay between sending a key exchange
+	// packet and success key exchange before resending the key exchange
+	// packet.
+	//
+	// If a zero-value then DefaultKeyExchangeRetryInterval is used instead.
+	RetryInterval time.Duration
+
 	// Timeout defines how long it can wait after sending a request
 	// to exchange keys and before the successful key exchange. If
 	// it waits more than the timeout then an error is returned.
@@ -94,18 +106,55 @@ type KeyExchangerOptions struct {
 	// So if it is set then to initiate a working session it's required to
 	// satisfy both conditions: valid (and expected) identities and the same PSK.
 	PSK []byte
+
+	// AnswerMode set the behavior of key-exchange message acknowledgments.
+	//
+	// When the local side receives a packet from the remote side it _may_
+	// send a key exchange packet even if it was already sent before. This
+	// packet is called "answer". An answer packet is marked with a special
+	// flag to prevent answers on answers (to prevent loops).
+	//
+	// If two parties has different AnswersModes then an error will be
+	// reported.
+	//
+	// See KeyExchangeAnswersMode values.
+	AnswersMode KeyExchangeAnswersMode
 }
+
+// KeyExchangeAnswersMode is the variable type for KeyExchangeOptions.AnswerMode
+type KeyExchangeAnswersMode uint8
+
+const (
+	// KeyExchangeAnswersModeDefault means use the default value of AnswerMode
+	KeyExchangeAnswersModeDefault = KeyExchangeAnswersMode(iota)
+
+	// KeyExchangeAnswersModeAnswerAndWait makes the key exchanger to send
+	// answers and wait for answers from the remote side before consider
+	// a key exchange to be successful.
+	KeyExchangeAnswersModeAnswerAndWait
+
+	// KeyExchangeAnswersModeAnswer makes the key exchanger to send
+	// answers, but don't wait for them from the remote side.
+	KeyExchangeAnswersModeAnswer
+
+	// KeyExchangeAnswersModeDisable makes the key exchanger to do not
+	// send answers and to do not wait for them from the remote side.
+	KeyExchangeAnswersModeDisable
+)
 
 func newKeyExchanger(
 	ctx context.Context,
 	localIdentity *Identity,
 	remoteIdentity *Identity,
 	messenger *Messenger,
-	okFunc func([]byte), errFunc func(error),
+	setSecretFunc func([]byte),
+	doneFunc func(),
+	errFunc func(error),
 	opts *KeyExchangerOptions,
 ) *keyExchanger {
 	kx := &keyExchanger{
-		okFunc:         okFunc,
+		setSecretFunc:  setSecretFunc,
+		doneFunc:       doneFunc,
 		errFunc:        errFunc,
 		localIdentity:  localIdentity,
 		remoteIdentity: remoteIdentity,
@@ -119,8 +168,14 @@ func newKeyExchanger(
 	if kx.options.Interval == 0 {
 		kx.options.Interval = DefaultKeyExchangeInterval
 	}
+	if kx.options.RetryInterval == 0 {
+		kx.options.RetryInterval = DefaultKeyExchangeRetryInterval
+	}
 	if kx.options.Timeout == 0 {
 		kx.options.Timeout = DefaultKeyExchangeTimeout
+	}
+	if kx.options.AnswersMode == KeyExchangeAnswersModeDefault {
+		kx.options.AnswersMode = KeyExchangeAnswersModeAnswerAndWait
 	}
 
 	kx.ctx, kx.cancelFunc = context.WithCancel(ctx)
@@ -178,7 +233,7 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 			return
 		}
 		if err = kx.remoteIdentity.VerifySignature(msg.Signature[:], msg.PublicKey[:]); err != nil {
-			kx.messenger.sess.debugf("wrong signature: %v", err)
+			kx.messenger.sess.debugf("[kx] wrong signature: %v", err)
 			return
 		}
 		if nextLocal == nil {
@@ -193,15 +248,34 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 			}
 			return
 		}
-		kx.okFunc(nextKey)
-		kx.lastExchangeTS = time.Now()
+
+		if msg.AnswersMode != kx.options.AnswersMode {
+			kx.errFunc(newErrAnswersModeMismatch(kx.options.AnswersMode, msg.AnswersMode))
+		}
+
+		kx.messenger.sess.debugf("[kx] set the secret")
+		kx.setSecretFunc(nextKey)
+		if msg.Flags.IsAnswer() || kx.options.AnswersMode != KeyExchangeAnswersModeAnswerAndWait {
+			kx.messenger.sess.debugf("[kx] a successful key exchange")
+			kx.doneFunc()
+			kx.lastExchangeTS = time.Now()
+		}
+
+		if !msg.Flags.IsAnswer() && kx.options.AnswersMode != KeyExchangeAnswersModeDisable {
+			go func() {
+				err := kx.sendPublicKey(true)
+				if err != nil {
+					kx.errFunc(wrapError(err))
+				}
+			}()
+		}
 	})
 	return
 }
 
 func (kx *keyExchanger) Close() error {
 	kx.stop()
-	kx.messenger.sess.debugf("key exchanger closed")
+	kx.messenger.sess.debugf("[kx] key exchanger closed")
 	return nil
 }
 
@@ -210,13 +284,14 @@ func (kx *keyExchanger) stop() {
 }
 
 func (kx *keyExchanger) start() {
+	kx.messenger.sess.debugf("[kx] kx.start()")
 	kx.UpdateKey()
 	kx.iterate()
 	go kx.loop()
 }
 
 func (kx *keyExchanger) iterate() {
-	kx.messenger.sess.debugf("kx.iterate()")
+	kx.messenger.sess.debugf("[kx] kx.iterate()")
 
 	var lastExchangeTS time.Time
 	kx.LockDo(func() {
@@ -233,16 +308,16 @@ func (kx *keyExchanger) iterate() {
 		kx.errFunc(newErrKeyExchangeTimeout())
 		return
 	}
-	err := kx.sendPublicKey()
+	err := kx.sendPublicKey(false)
 	if err != nil {
 		_ = kx.Close()
-		kx.errFunc(xerrors.Errorf("unable to send a public key: %w", err))
+		kx.errFunc(xerrors.Errorf("[kx] unable to send a public key: %w", err))
 		return
 	}
 }
 
 func (kx *keyExchanger) loop() {
-	sendPublicKeyTicker := time.NewTicker(time.Second)
+	sendPublicKeyTicker := time.NewTicker(kx.options.RetryInterval)
 	defer sendPublicKeyTicker.Stop()
 	for {
 		select {
@@ -255,11 +330,15 @@ func (kx *keyExchanger) loop() {
 	}
 }
 
-func (kx *keyExchanger) sendPublicKey() error {
-	kx.messenger.sess.debugf("kx.sendPublicKey()")
-	msg := &kx.localKeySeedUpdateMessage
-	copy(msg.PublicKey[:], (*kx.nextLocalPublicKey)[:])
+func (kx *keyExchanger) sendPublicKey(isAnswer bool) error {
+	kx.messenger.sess.debugf("[kx] kx.sendPublicKey(isAnswer: %v)", isAnswer)
+	msg := &keySeedUpdateMessage{}
+	kx.nextLocalKeyLocker.RLockDo(func() {
+		copy(msg.PublicKey[:], (*kx.nextLocalPublicKey)[:])
+	})
 	kx.localIdentity.Sign(msg.Signature[:], msg.PublicKey[:])
+	msg.Flags.SetIsAnswer(isAnswer)
+	msg.AnswersMode = kx.options.AnswersMode
 	return kx.send(msg)
 }
 
@@ -267,7 +346,7 @@ func (kx *keyExchanger) UpdateKey() {
 	privKey, pubKey, err := kx.ecdh.GenerateKey(rand.Reader)
 	if err != nil {
 		_ = kx.Close()
-		kx.errFunc(xerrors.Errorf("unable to generate ECDH keys: %w", err))
+		kx.errFunc(xerrors.Errorf("[kx] unable to generate ECDH keys: %w", err))
 		return
 	}
 	privKeyCasted := privKey.([curve25519PrivateKeySize]byte)

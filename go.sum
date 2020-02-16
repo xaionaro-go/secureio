@@ -13,8 +13,8 @@ github.com/stretchr/testify v1.4.0 h1:2E4SXV/wtOkTonXsotYi4li6zVWxYlZuYNCXe9XRJy
 github.com/stretchr/testify v1.4.0/go.mod h1:j7eGeouHqKxXV5pUuKE4zz7dFj8WfuZ+81PSLYec5m4=
 github.com/valyala/fastrand v1.0.0 h1:LUKT9aKer2dVQNUi3waewTbKV+7H17kvWFNKs2ObdkI=
 github.com/valyala/fastrand v1.0.0/go.mod h1:HWqCzkrkg6QXT8V2EXWvXCoow7vLwOFN002oeRzjapQ=
-github.com/xaionaro-go/errors v0.0.0-20200209154903-9fc7351b94d5 h1:OBXLGgovg876xOsLil8JnNOhm+A0yqRtX7SHxLvr+HE=
-github.com/xaionaro-go/errors v0.0.0-20200209154903-9fc7351b94d5/go.mod h1:kbL3cDyZdqjEhQR1+LVHz0/ZYbFpH62e6t3zCDKmbLA=
+github.com/xaionaro-go/errors v0.0.0-20200216213630-0fb5c31db89f h1:9upywwnCrmqJRpcR50hwIZOaFg++MgEpYwE4xM3ktNU=
+github.com/xaionaro-go/errors v0.0.0-20200216213630-0fb5c31db89f/go.mod h1:kbL3cDyZdqjEhQR1+LVHz0/ZYbFpH62e6t3zCDKmbLA=
 github.com/xaionaro-go/rand v0.0.0-20191005105903-aba1befc54a5 h1:99a+XCYQ9ed4WjW7s2wJXjTUejOznFL+bOKMJtVLh80=
 github.com/xaionaro-go/rand v0.0.0-20191005105903-aba1befc54a5/go.mod h1:7GUXx8dYHRMAYntgs4o1Vm1IPZ7EIpGbev68nKIKGMQ=
 github.com/xaionaro-go/slice v0.0.0-20200126131228-455c082ffedb h1:qEmeKHWu+mhuk7+Na2/apZpMQb9U/wjtBDb3NlOhkHc=
@@ -38,6 +38,8 @@ golang.org/x/sys v0.0.0-20190626221950-04f50cda93cb/go.mod h1:h1NjWce9XRLGQEsW7w
 golang.org/x/sys v0.0.0-20200202164722-d101bd2416d5 h1:LfCXLvNmTYH9kEmVgqbnsWfruoXZIrh4YBgqVHtDvw0=
 golang.org/x/sys v0.0.0-20200202164722-d101bd2416d5/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/text v0.3.0/go.mod h1:NqM8EUOU14njkJ3fqMW+pc6Ldnwhi/IjpwHt7yyuwOQ=
+golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543 h1:E7g+9GITq07hpfrRu66IVDexMakfv52eLZ2CXBWiKr4=
+golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+SDo693bJlVdllGtEeKM=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
 gopkg.in/yaml.v2 v2.2.2 h1:ZCJp+EgiOT7lHqUV2J862kp8Qj64Jo6az82+3Td9dZw=

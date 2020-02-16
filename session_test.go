@@ -358,6 +358,9 @@ func TestHackerDuplicateMessage(t *testing.T) {
 			readLogsOfSession(t, true, sess)
 		}},
 		EnableDebug: true,
+		KeyExchangerOptions: KeyExchangerOptions{
+			AnswersMode: KeyExchangeAnswersModeDisable,
+		},
 	}
 
 	// No hacker, yet

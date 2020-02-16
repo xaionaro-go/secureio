@@ -38,5 +38,8 @@ func wrapErrorHandler(
 }
 
 func (wrapper *errorHandlerWrapper) Error(sess *Session, err error) bool {
-	return wrapper.ErrorHandler(sess, err)
+	if !wrapper.EventHandler.Error(sess, err) {
+		return wrapper.ErrorHandler(sess, err)
+	}
+	return true
 }

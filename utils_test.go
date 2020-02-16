@@ -1,8 +1,11 @@
 package secureio_test
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
@@ -28,7 +31,10 @@ type testLogger struct {
 
 func (l *testLogger) Error(sess *Session, err error) bool {
 	xerr := err.(*errors.Error)
-	if xerr.Has(io.EOF) {
+	if xerr.Has(&net.OpError{}) {
+		return true // For test TestMissedKeySeedMessage
+	}
+	if xerr.Has(io.EOF) || xerr.Has(ErrAlreadyClosed{}) {
 		return false
 	}
 	l.T.Errorf("E:%v:SID:%v:%v", l.T.Name(), sess.ID(), xerr)
@@ -96,24 +102,31 @@ func readLogsOfSession(t *testing.T, enableInfo bool, sess *Session) {
 func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 io.ReadWriteCloser) {
 	var err error
 
+	if t == nil {
+		t = &testing.T{}
+	}
+
 	go func() {
 		http.ListenAndServe("localhost:6060", nil)
 	}()
 
-	dir := fmt.Sprintf(`/tmp/.test_xaionaro-go_secureio_session-%d_`, os.Getpid())
-	_ = os.Mkdir(dir+"0", 0700)
-	_ = os.Mkdir(dir+"1", 0700)
-	identity0, err = NewIdentity(dir + "0")
+	keyRand := rand.New(rand.NewSource(0))
+
+	_, key0, err := ed25519.GenerateKey(keyRand)
+	assert.NoError(t, err)
+	identity0, err = NewIdentityFromPrivateKey(key0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity1, err = NewIdentity(dir + "1")
+
+	_, key1, err := ed25519.GenerateKey(keyRand)
+	assert.NoError(t, err)
+	identity1, err = NewIdentityFromPrivateKey(key1)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	if testUseUnixSocket {
-
 		testPairMutex.Lock()
 		defer testPairMutex.Unlock()
 
@@ -180,13 +193,23 @@ func testConnIsOpen(t *testing.T, conn0, conn1 io.ReadWriteCloser) {
 	_, err = conn1.Write(b)
 	assert.NoError(t, err)
 
-	_, err = conn0.Read(b)
-	assert.NoError(t, err)
-	assert.Equal(t, `test`, string(b))
+	readBuf := make([]byte, 65536)
 
-	_, err = conn1.Read(b)
-	assert.NoError(t, err)
-	assert.Equal(t, `test`, string(b))
+	for {
+		n, err := conn0.Read(readBuf)
+		assert.NoError(t, err)
+		if bytes.Compare(readBuf[:n], []byte(`test`)) == 0 {
+			break
+		}
+	}
+
+	for {
+		n, err := conn1.Read(readBuf)
+		assert.NoError(t, err)
+		if bytes.Compare(readBuf[:n], []byte(`test`)) == 0 {
+			break
+		}
+	}
 }
 
 type dummyEventHandler struct{}

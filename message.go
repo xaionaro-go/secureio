@@ -25,7 +25,6 @@ const (
 
 var (
 	maxPayloadSize uint32
-	nextPacketID   uint64 // is used as nonce
 )
 
 func init() {
@@ -169,8 +168,8 @@ func (id *packetID) Value() uint64 {
 func (id *packetID) String() string {
 	return fmt.Sprint(id.Value())
 }
-func (id *packetID) SetNextPacketID() {
-	binaryOrderType.PutUint64((*id)[:], atomic.AddUint64(&nextPacketID, 1))
+func (id *packetID) SetNextPacketID(sess *Session) {
+	binaryOrderType.PutUint64((*id)[:], atomic.AddUint64(&sess.nextPacketID, 1))
 }
 func (id *packetID) Read(b []byte) (int, error) {
 	if len(b) < ivSize {
@@ -280,8 +279,8 @@ func (hdr *messageHeadersData) Write(b []byte) (int, error) {
 	return int(messageHeadersSize), nil
 }
 
-func (containerHdr *messagesContainerHeadersData) UpdatePacketID() {
-	containerHdr.PacketID.SetNextPacketID()
+func (containerHdr *messagesContainerHeadersData) SetNextPacketID(sess *Session) {
+	containerHdr.PacketID.SetNextPacketID(sess)
 }
 
 func (containerHdr *messagesContainerHeadersData) calculatePoly1305Key(cipherKey []byte) (result [32]byte) {
@@ -411,13 +410,13 @@ func newMessagesContainerHeadersPool() *messagesContainerHeadersPool {
 	return pool
 }
 
-func (pool *messagesContainerHeadersPool) AcquireMessagesContainerHeaders() *messagesContainerHeaders {
+func (pool *messagesContainerHeadersPool) AcquireMessagesContainerHeaders(sess *Session) *messagesContainerHeaders {
 	containerHdr := pool.storage.Get().(*messagesContainerHeaders)
 	if containerHdr.isBusy {
 		panic(`should not happened`)
 	}
 	containerHdr.isBusy = true
-	containerHdr.UpdatePacketID()
+	containerHdr.SetNextPacketID(sess)
 	return containerHdr
 }
 

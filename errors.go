@@ -189,6 +189,7 @@ func newErrInvalidChecksum(expectedChecksum, realChecksum []byte) error {
 	copy(origErr.RealChecksum[:], realChecksum)
 	err := errors.New(origErr)
 	err.Traceback.CutOffFirstNLines += 2
+	err.Format = errors.FormatOneLine
 	return err
 }
 func (err ErrInvalidChecksum) Error() string {
@@ -239,4 +240,18 @@ func newErrCanceled() error {
 }
 func (err ErrCanceled) Error() string {
 	return fmt.Sprintf("canceled")
+}
+
+type ErrAnswersModeMismatch struct {
+	AnswersModeLocal  KeyExchangeAnswersMode
+	AnswersModeRemote KeyExchangeAnswersMode
+}
+
+func newErrAnswersModeMismatch(answersModeLocal, answersModeRemote KeyExchangeAnswersMode) error {
+	err := errors.New(ErrAnswersModeMismatch{answersModeLocal, answersModeRemote})
+	err.Traceback.CutOffFirstNLines += 2
+	return err
+}
+func (err ErrAnswersModeMismatch) Error() string {
+	return fmt.Sprintf("[kx] AnswersMode does not match: local:%v != remote:%v", err.AnswersModeLocal, err.AnswersModeRemote)
 }
