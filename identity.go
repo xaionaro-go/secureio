@@ -159,7 +159,7 @@ func (i *Identity) generateAndSaveKeys(keysDir string) error {
 }
 
 func loadPublicKeyFromFile(keyPtr *ed25519.PublicKey, path string) error {
-	keyBytes, err := ioutil.ReadFile(path)
+	keyBytes, err := ioutil.ReadFile(path) // #nosec
 	if err != nil {
 		return xerrors.Errorf("unable to read key: %w", err)
 	}
@@ -173,7 +173,7 @@ func loadPublicKeyFromFile(keyPtr *ed25519.PublicKey, path string) error {
 }
 
 func loadPrivateKeyFromFile(keyPtr *ed25519.PrivateKey, path string) error {
-	keyBytes, err := ioutil.ReadFile(path)
+	keyBytes, err := ioutil.ReadFile(path) // #nosec
 	if err != nil {
 		return xerrors.Errorf("unable to read file: %w", err)
 	}

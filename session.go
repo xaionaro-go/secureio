@@ -14,8 +14,9 @@ import (
 
 	"github.com/aead/chacha20/chacha"
 	"github.com/mohae/deepcopy"
-	xerrors "github.com/xaionaro-go/errors"
 	"golang.org/x/crypto/poly1305"
+
+	xerrors "github.com/xaionaro-go/errors"
 )
 
 const (
@@ -372,9 +373,9 @@ func (sess *Session) startBackendCloser() {
 			return
 		}
 
-		sess.backend.Close()
-		sess.debugf("sess.backend.Close(): %v ?= %v; %v ?= %v",
-			recvMsgCount, sess.options.DetachOnMessagesCount,
+		closeErr := sess.backend.Close()
+		sess.debugf("sess.backend.Close() -> %v: %v ?= %v; %v ?= %v",
+			closeErr, recvMsgCount, sess.options.DetachOnMessagesCount,
 			seqDecryptFailsCount, sess.options.DetachOnSequentialDecryptFailsCount)
 	}()
 }
@@ -1405,6 +1406,10 @@ func (sess *Session) infof(format string, args ...interface{}) {
 		default:
 		}
 	})
+}
+
+func (sess *Session) error(err error) {
+	sess.eventHandler.Error(sess, err)
 }
 
 func (sess *Session) startKeyExchange() {
