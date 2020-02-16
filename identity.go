@@ -77,11 +77,18 @@ func NewIdentity(keysDir string) (*Identity, error) {
 //
 // The returned identity could be used as both: local and remote
 // (see `Identity`).
-func NewIdentityFromPrivateKey(privKey ed25519.PrivateKey) *Identity {
+func NewIdentityFromPrivateKey(privKey ed25519.PrivateKey) (*Identity, error) {
+	if len(privKey) != PrivateKeySize {
+		return nil, &ErrWrongKeyLength{
+			ExpectedLength: PrivateKeySize,
+			RealLength:     uint(len(privKey)),
+		}
+	}
+
 	i := &Identity{}
 	i.Keys.Private = privKey
 	i.Keys.Public = privKey.Public().(ed25519.PublicKey)
-	return i
+	return i, nil
 }
 
 // NewRemoteIdentity is a constructor for `Identity` based on the path
@@ -100,10 +107,17 @@ func NewRemoteIdentity(keyPath string) (*Identity, error) {
 //
 // The returned identity could be used only as a remote identity
 // (see `Identity`).
-func NewRemoteIdentityFromPublicKey(pubKey ed25519.PublicKey) *Identity {
+func NewRemoteIdentityFromPublicKey(pubKey ed25519.PublicKey) (*Identity, error) {
+	if len(pubKey) != PublicKeySize {
+		return nil, &ErrWrongKeyLength{
+			ExpectedLength: PublicKeySize,
+			RealLength:     uint(len(pubKey)),
+		}
+	}
+
 	i := &Identity{}
 	i.Keys.Public = pubKey
-	return i
+	return i, nil
 }
 
 func (i *Identity) savePublicKey(keysDir string) error {
