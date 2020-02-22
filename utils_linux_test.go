@@ -28,7 +28,7 @@ func udpSetNoFragment(conn *net.UDPConn) (err error) {
 
 func testUDPPair(t *testing.T) (*net.UDPConn, *net.UDPConn) {
 testUDPPairStart:
-	localhost := net.ParseIP("127.0.0.1")
+	localhost := net.ParseIP("127.120.97.105") // just a free address, I hope
 
 	conn0, err := net.DialUDP(`udp`, &net.UDPAddr{IP: localhost}, &net.UDPAddr{IP: localhost})
 	assert.NoError(t, err)

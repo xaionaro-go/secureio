@@ -2,6 +2,7 @@ package secureio
 
 import (
 	"fmt"
+	"io"
 
 	"golang.org/x/crypto/poly1305"
 
@@ -254,4 +255,28 @@ func newErrAnswersModeMismatch(answersModeLocal, answersModeRemote KeyExchangeAn
 }
 func (err ErrAnswersModeMismatch) Error() string {
 	return fmt.Sprintf("[kx] AnswersMode does not match: local:%v != remote:%v", err.AnswersModeLocal, err.AnswersModeRemote)
+}
+
+type ErrCannotSetReadDeadline struct {
+	Backend io.ReadWriteCloser
+}
+
+func newErrCannotSetReadDeadline(backend io.ReadWriteCloser) error {
+	err := errors.New(ErrCannotSetReadDeadline{Backend: backend})
+	err.Traceback.CutOffFirstNLines += 2
+	return err
+}
+func (err ErrCannotSetReadDeadline) Error() string {
+	return fmt.Sprintf("do not know how to set ReadDeadline on %T", err.Backend)
+}
+
+type ErrCannotPauseFromThisState struct{}
+
+func newErrCannotPauseFromThisState() error {
+	err := errors.New(ErrCannotPauseFromThisState{})
+	err.Traceback.CutOffFirstNLines += 2
+	return err
+}
+func (err ErrCannotPauseFromThisState) Error() string {
+	return fmt.Sprintf("cannot pause from this state")
 }

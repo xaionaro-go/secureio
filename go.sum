@@ -13,8 +13,8 @@ github.com/stretchr/testify v1.4.0 h1:2E4SXV/wtOkTonXsotYi4li6zVWxYlZuYNCXe9XRJy
 github.com/stretchr/testify v1.4.0/go.mod h1:j7eGeouHqKxXV5pUuKE4zz7dFj8WfuZ+81PSLYec5m4=
 github.com/valyala/fastrand v1.0.0 h1:LUKT9aKer2dVQNUi3waewTbKV+7H17kvWFNKs2ObdkI=
 github.com/valyala/fastrand v1.0.0/go.mod h1:HWqCzkrkg6QXT8V2EXWvXCoow7vLwOFN002oeRzjapQ=
-github.com/xaionaro-go/errors v0.0.0-20200216213630-0fb5c31db89f h1:9upywwnCrmqJRpcR50hwIZOaFg++MgEpYwE4xM3ktNU=
-github.com/xaionaro-go/errors v0.0.0-20200216213630-0fb5c31db89f/go.mod h1:kbL3cDyZdqjEhQR1+LVHz0/ZYbFpH62e6t3zCDKmbLA=
+github.com/xaionaro-go/errors v0.0.0-20200217001156-1f4fe255c029 h1:hJ+Q659P/ImakySG2nKgYGwvZOA2haHZRlFI+dddNew=
+github.com/xaionaro-go/errors v0.0.0-20200217001156-1f4fe255c029/go.mod h1:kbL3cDyZdqjEhQR1+LVHz0/ZYbFpH62e6t3zCDKmbLA=
 github.com/xaionaro-go/rand v0.0.0-20191005105903-aba1befc54a5 h1:99a+XCYQ9ed4WjW7s2wJXjTUejOznFL+bOKMJtVLh80=
 github.com/xaionaro-go/rand v0.0.0-20191005105903-aba1befc54a5/go.mod h1:7GUXx8dYHRMAYntgs4o1Vm1IPZ7EIpGbev68nKIKGMQ=
 github.com/xaionaro-go/slice v0.0.0-20200126131228-455c082ffedb h1:qEmeKHWu+mhuk7+Na2/apZpMQb9U/wjtBDb3NlOhkHc=

@@ -20,6 +20,8 @@ func TestMissedKeySeedMessage(t *testing.T) {
 	opts := &SessionOptions{}
 	opts.OnInitFuncs = []OnInitFunc{func(sess *Session) { readLogsOfSession(t, false, sess) }}
 	opts.EnableDebug = true
+	opts.EnableInfo = true
+	opts.AllowReorderingAndDuplication = true                 // it's UDP :(
 	opts.KeyExchangerOptions.RetryInterval = time.Millisecond // speed-up the unit test
 
 	ctx := context.Background()
@@ -34,7 +36,7 @@ func TestMissedKeySeedMessage(t *testing.T) {
 		assert.NoError(t, err)
 	}()
 
-	// Getting one packet miss
+	// Getting one packet missed
 	missedBytes := 0
 	for {
 		readBuf := make([]byte, 65536)

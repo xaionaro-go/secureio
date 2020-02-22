@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/xaionaro-go/slice"
@@ -222,7 +223,7 @@ func benchmarkSessionWriteRead(
 
 	if eventHandler == nil {
 		eventHandler = wrapErrorHandler(&dummyEventHandler{}, func(sess *Session, err error) bool {
-			if errors.Is(err, io.EOF) {
+			if errors.Is(err, io.EOF) || errors.As(err, &ErrAlreadyClosed{}) {
 				return false
 			}
 			if pathErr := (*os.PathError)(nil); errors.As(err, &pathErr) {
@@ -359,7 +360,8 @@ func TestHackerDuplicateMessage(t *testing.T) {
 		}},
 		EnableDebug: true,
 		KeyExchangerOptions: KeyExchangerOptions{
-			AnswersMode: KeyExchangeAnswersModeDisable,
+			AnswersMode:   KeyExchangeAnswersModeDisable,
+			RetryInterval: time.Millisecond,
 		},
 	}
 
@@ -377,23 +379,13 @@ func TestHackerDuplicateMessage(t *testing.T) {
 
 	// Intercepting a message
 
-	// sess1.SetPause(true) will temporary pause sess1 _after_ receiving
-	// the next message. So we will be able to read from `conn1` to
-	// intercept a message.
-	for !sess1.SetPause(true) {
-		sess1.WaitForState(ctx, SessionStateEstablished)
-	}
+	// wait for successful key-exchange
+	sess0.WaitForState(ctx, SessionStateEstablished)
+	sess1.WaitForState(ctx, SessionStateEstablished)
 
-	// The next message:
-	if sess1.IsReading() {
-		_, err := sess0.Write(writeBuf)
-		assert.NoError(t, err)
-
-		_, err = sess1.Read(readBuf)
-		assert.NoError(t, err)
-
-		assert.Equal(t, writeBuf, readBuf)
-	}
+	// sess1.SetPause(true) will temporary pause sess1.
+	// So we will be able to read from `conn1` to intercept a message.
+	assert.NoError(t, sess1.SetPause(true))
 
 	rand.Read(writeBuf)
 
@@ -410,7 +402,7 @@ func TestHackerDuplicateMessage(t *testing.T) {
 
 	// Unpausing and resending the message to pretend like we
 	// weren't here:
-	assert.True(t, sess1.SetPause(false))
+	assert.Nil(t, sess1.SetPause(false))
 	_, err = conn0.Write(interceptedMessage)
 	assert.NoError(t, err)
 

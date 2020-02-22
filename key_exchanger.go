@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"runtime"
 	"sync"
 	"time"
 
@@ -53,7 +54,7 @@ var (
 )
 
 type keyExchanger struct {
-	locker sync.Mutex
+	locker sync.RWMutex
 
 	ctx           context.Context
 	cancelFunc    func()
@@ -72,12 +73,17 @@ type keyExchanger struct {
 	remoteIdentity             *Identity
 	messenger                  *Messenger
 	ecdh                       ecdh.KeyExchange
+
+	keyID             uint64
+	nextKeyID         uint64
+	successNotifyChan chan uint64
+	keyUpdateLocker   lockerRWMutex
 }
 
 // KeyExchangerOptions is used to configure the key exchanging options.
 // It's passed to a session via SessionOptions.
 type KeyExchangerOptions struct {
-	// Interval defines delay between generating a new cipher key.
+	// KeyUpdateInterval defines delay between generating a new cipher key.
 	//
 	// Generating a key is an expensive operation. Moreover
 	// secureio remembers only the current key and the previous one. So
@@ -85,7 +91,7 @@ type KeyExchangerOptions struct {
 	// round-trip between peers, then the session will be very unstable.
 	//
 	// If a zero-value then DefaultKeyExchangeInterval is used.
-	Interval time.Duration
+	KeyUpdateInterval time.Duration
 
 	// RetryInterval defines the maximal delay between sending a key exchange
 	// packet and success key exchange before resending the key exchange
@@ -153,20 +159,21 @@ func newKeyExchanger(
 	opts *KeyExchangerOptions,
 ) *keyExchanger {
 	kx := &keyExchanger{
-		setSecretFunc:  setSecretFunc,
-		doneFunc:       doneFunc,
-		errFunc:        errFunc,
-		localIdentity:  localIdentity,
-		remoteIdentity: remoteIdentity,
-		messenger:      messenger,
-		ecdh:           ecdh.X25519(),
+		setSecretFunc:     setSecretFunc,
+		doneFunc:          doneFunc,
+		errFunc:           errFunc,
+		localIdentity:     localIdentity,
+		remoteIdentity:    remoteIdentity,
+		messenger:         messenger,
+		ecdh:              ecdh.X25519(),
+		successNotifyChan: make(chan uint64),
 	}
 
 	if opts != nil {
 		kx.options = *opts
 	}
-	if kx.options.Interval == 0 {
-		kx.options.Interval = DefaultKeyExchangeInterval
+	if kx.options.KeyUpdateInterval == 0 {
+		kx.options.KeyUpdateInterval = DefaultKeyExchangeInterval
 	}
 	if kx.options.RetryInterval == 0 {
 		kx.options.RetryInterval = DefaultKeyExchangeRetryInterval
@@ -179,9 +186,19 @@ func newKeyExchanger(
 	}
 
 	kx.ctx, kx.cancelFunc = context.WithCancel(ctx)
+	go func() {
+		<-kx.ctx.Done()
+		close(kx.successNotifyChan)
+	}()
 	messenger.SetHandler(kx)
 	kx.start()
 	return kx
+}
+
+func (kx *keyExchanger) RLockDo(fn func()) {
+	kx.locker.RLock()
+	defer kx.locker.RUnlock()
+	fn()
 }
 
 func (kx *keyExchanger) LockDo(fn func()) {
@@ -237,7 +254,7 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 			return
 		}
 		if nextLocal == nil {
-			return // Not ready, yet. It's required to call UpdateKey(), first
+			return // Not ready, yet. It's required to call KeyUpdateSendWait(), first
 		}
 		nextRemote := &msg.PublicKey
 		nextKey, genErr := kx.generateSharedKey(nextLocal, nextRemote)
@@ -256,21 +273,36 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 		kx.messenger.sess.debugf("[kx] set the secret")
 		kx.setSecretFunc(nextKey)
 		if msg.Flags.IsAnswer() || kx.options.AnswersMode != KeyExchangeAnswersModeAnswerAndWait {
-			kx.messenger.sess.debugf("[kx] a successful key exchange")
-			kx.doneFunc()
 			kx.lastExchangeTS = time.Now()
+			kx.sendSuccessNotifications()
 		}
 
 		if !msg.Flags.IsAnswer() && kx.options.AnswersMode != KeyExchangeAnswersModeDisable {
 			go func() {
-				err := kx.sendPublicKey(true)
-				if err != nil {
-					kx.errFunc(wrapError(err))
-				}
+				kx.mustSendPublicKey(true)
 			}()
 		}
 	})
 	return
+}
+
+func (kx *keyExchanger) sendSuccessNotifications() {
+	var nextKeyID uint64
+	kx.nextLocalKeyLocker.RLockDo(func() {
+		nextKeyID = kx.nextKeyID
+		kx.keyID = nextKeyID
+	})
+	func() {
+		defer func() { recover() }() // just in case; TODO: remove this line
+		select {
+		case <-kx.ctx.Done():
+		case kx.successNotifyChan <- nextKeyID:
+		default:
+		}
+	}()
+	kx.messenger.sess.debugf("[kx] a successful key exchange, keyID == %v", nextKeyID)
+
+	kx.doneFunc()
 }
 
 func (kx *keyExchanger) Close() error {
@@ -285,48 +317,31 @@ func (kx *keyExchanger) stop() {
 
 func (kx *keyExchanger) start() {
 	kx.messenger.sess.debugf("[kx] kx.start()")
-	kx.UpdateKey()
-	kx.iterate()
 	go kx.loop()
 }
 
-func (kx *keyExchanger) iterate() {
-	kx.messenger.sess.debugf("[kx] kx.iterate()")
-
-	var lastExchangeTS time.Time
-	kx.LockDo(func() {
-		lastExchangeTS = kx.lastExchangeTS
-	})
-	now := time.Now()
-	if !lastExchangeTS.IsZero() &&
-		now.Sub(lastExchangeTS) < kx.options.Interval {
-		return
-	}
-	if !lastExchangeTS.IsZero() &&
-		now.Sub(lastExchangeTS) > kx.options.Interval+kx.options.Timeout {
-		_ = kx.Close()
-		kx.errFunc(newErrKeyExchangeTimeout())
-		return
-	}
-	err := kx.sendPublicKey(false)
-	if err != nil {
-		_ = kx.Close()
-		kx.errFunc(xerrors.Errorf("[kx] unable to send a public key: %w", err))
-		return
-	}
-}
-
 func (kx *keyExchanger) loop() {
-	sendPublicKeyTicker := time.NewTicker(kx.options.RetryInterval)
-	defer sendPublicKeyTicker.Stop()
+	kx.KeyUpdateSendWait()
+
+	keyUpdateTicker := time.NewTicker(kx.options.KeyUpdateInterval)
+	defer keyUpdateTicker.Stop()
+
 	for {
 		select {
 		case <-kx.ctx.Done():
 			_ = kx.messenger.Close()
 			return
-		case <-sendPublicKeyTicker.C:
-			kx.iterate()
+		case <-keyUpdateTicker.C:
+			kx.KeyUpdateSendWait()
 		}
+	}
+}
+
+func (kx *keyExchanger) mustSendPublicKey(isAnswer bool) {
+	err := kx.sendPublicKey(isAnswer)
+	if err != nil {
+		_ = kx.Close()
+		kx.errFunc(xerrors.Errorf("[kx] unable to send a public key: %w", err))
 	}
 }
 
@@ -342,20 +357,93 @@ func (kx *keyExchanger) sendPublicKey(isAnswer bool) error {
 	return kx.send(msg)
 }
 
-func (kx *keyExchanger) UpdateKey() {
+func (kx *keyExchanger) updateKey() (result uint64) {
+	var isAlreadyInProgress bool
+	kx.nextLocalKeyLocker.RLockDo(func() {
+		isAlreadyInProgress = kx.nextKeyID > kx.keyID
+	})
+	if isAlreadyInProgress {
+		panic("isAlreadyInProgress")
+	}
+
 	privKey, pubKey, err := kx.ecdh.GenerateKey(rand.Reader)
 	if err != nil {
 		_ = kx.Close()
 		kx.errFunc(xerrors.Errorf("[kx] unable to generate ECDH keys: %w", err))
-		return
+		return 0
 	}
 	privKeyCasted := privKey.([curve25519PrivateKeySize]byte)
 	pubKeyCasted := pubKey.([curve25519PublicKeySize]byte)
 	kx.nextLocalKeyLocker.LockDo(func() {
 		kx.nextLocalPrivateKey = &privKeyCasted
 		kx.nextLocalPublicKey = &pubKeyCasted
+		kx.nextKeyID = kx.keyID + 1
+		result = kx.nextKeyID
 	})
+
 	return
+}
+
+func (kx *keyExchanger) KeyUpdateSendWait() {
+	kx.messenger.sess.debugf("[kx] KeyUpdateSendWait")
+	kx.keyUpdateLocker.LockDo(func() {
+		// Empty the chan (to wait for our event only on retries)
+		for {
+			select {
+			case <-kx.ctx.Done():
+				return
+			case _, ok := <-kx.successNotifyChan:
+				if !ok {
+					return
+				}
+				continue
+			default:
+			}
+			break
+		}
+
+		// Update the key (and increase nextKeyID)
+		nextKeyID := kx.updateKey()
+		kx.messenger.sess.debugf("[kx] nextKeyID == %v", nextKeyID)
+		if nextKeyID == 0 {
+			return
+		}
+
+		// Send
+		kx.mustSendPublicKey(false)
+
+		// Retries:
+		timeoutTimer := time.NewTimer(kx.options.Timeout)
+		retryTicker := time.NewTicker(kx.options.RetryInterval)
+		defer retryTicker.Stop()
+		for {
+			select {
+			case <-kx.ctx.Done():
+				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: done")
+				return
+			case newKeyID, ok := <-kx.successNotifyChan:
+				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: success (keyID == %v)", newKeyID)
+				if !ok {
+					return
+				}
+				if newKeyID > nextKeyID {
+					panic(`newKeyID > nextKeyID`)
+				}
+				if newKeyID == nextKeyID {
+					return
+				}
+			case <-retryTicker.C:
+				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: retry (waiting for keyID == %v)", nextKeyID)
+				runtime.Gosched()
+				kx.mustSendPublicKey(false)
+			case <-timeoutTimer.C:
+				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: timeout")
+				_ = kx.Close()
+				kx.errFunc(newErrKeyExchangeTimeout())
+				return
+			}
+		}
+	})
 }
 
 func (kx *keyExchanger) send(msg *keySeedUpdateMessage) error {

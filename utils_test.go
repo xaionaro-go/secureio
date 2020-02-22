@@ -11,6 +11,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -98,6 +99,8 @@ func readLogsOfSession(t *testing.T, enableInfo bool, sess *Session) {
 	}()
 }
 
+var testPipeCounter uint64
+
 //go:norace
 func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 io.ReadWriteCloser) {
 	var err error
@@ -130,7 +133,7 @@ func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 io.Rea
 		testPairMutex.Lock()
 		defer testPairMutex.Unlock()
 
-		sockPath := fmt.Sprintf(`/tmp/xaionaro-go-secureio-%d-0.sock`, os.Getpid())
+		sockPath := fmt.Sprintf(`/tmp/xaionaro-go-secureio-%d-%d-0.sock`, os.Getpid(), atomic.AddUint64(&testPipeCounter, 1))
 		_ = os.Remove(sockPath)
 
 		l0, err := net.Listen(`unixpacket`, sockPath)
@@ -188,16 +191,22 @@ func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 io.Rea
 func testConnIsOpen(t *testing.T, conn0, conn1 io.ReadWriteCloser) {
 	b := []byte(`test`)
 	_, err := conn0.Write(b)
-	assert.NoError(t, err)
+	if !assert.NoError(t, err) {
+		return
+	}
 
 	_, err = conn1.Write(b)
-	assert.NoError(t, err)
+	if !assert.NoError(t, err) {
+		return
+	}
 
 	readBuf := make([]byte, 65536)
 
 	for {
 		n, err := conn0.Read(readBuf)
-		assert.NoError(t, err)
+		if !assert.NoError(t, err) {
+			return
+		}
 		if bytes.Compare(readBuf[:n], []byte(`test`)) == 0 {
 			break
 		}
@@ -205,7 +214,9 @@ func testConnIsOpen(t *testing.T, conn0, conn1 io.ReadWriteCloser) {
 
 	for {
 		n, err := conn1.Read(readBuf)
-		assert.NoError(t, err)
+		if !assert.NoError(t, err) {
+			return
+		}
 		if bytes.Compare(readBuf[:n], []byte(`test`)) == 0 {
 			break
 		}

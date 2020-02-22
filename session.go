@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -104,6 +105,9 @@ type Session struct {
 
 	pauseLocker sync.Mutex
 	isReading   uint64
+
+	readInterruptsRequested uint64
+	readInterruptsHappened  uint64
 }
 
 // DebugOutputEntry is a structure of data which is being passed to a debugger
@@ -367,11 +371,19 @@ func (sess *Session) startBackendCloser() {
 
 		if sess.options.DetachOnMessagesCount != 0 &&
 			recvMsgCount == sess.options.DetachOnMessagesCount {
+			sess.debugf("startBackendCloser(): detach due to MessagesCount")
+			if err := sess.interruptRead(); err != nil {
+				sess.error(err)
+			}
 			return
 		}
 
 		if sess.options.DetachOnSequentialDecryptFailsCount != 0 &&
 			seqDecryptFailsCount == sess.options.DetachOnSequentialDecryptFailsCount {
+			sess.debugf("startBackendCloser(): detach due to FailsCount")
+			if err := sess.interruptRead(); err != nil {
+				sess.error(err)
+			}
 			return
 		}
 
@@ -403,18 +415,17 @@ func (sess *Session) isDoneSlow() bool {
 }
 
 // SetPause with value `true` temporary disables the reading process
-// from the backend Reader. It does not stop currently running
-// `Read()` from the backend Reader, so it's required to wait
-// for the next message to get the affection.
+// from the backend Reader.
+//
 // SetPause(true) could be used only from state SessionStateEstablished.
 //
 // SetPause with value `false` re-enables the reading process from
 // the backend Reader. It could be used only from state SessionStatePaused.
 //
-// Returns true if the action was successful.
-func (sess *Session) SetPause(newValue bool) (result bool) {
+// Returns nil if the action was successful.
+func (sess *Session) SetPause(newValue bool) (err error) {
 	sess.debugf("SetPause(%v)", newValue)
-	defer func() { sess.debugf("SetPause(%v) -> %v", newValue, result) }()
+	defer func() { sess.debugf("SetPause(%v) -> %v", newValue, err) }()
 
 	badStates := []SessionState{
 		SessionStateNew,
@@ -423,6 +434,7 @@ func (sess *Session) SetPause(newValue bool) (result bool) {
 		SessionStateKeyExchanging,
 	}
 
+	result := false
 	sess.LockDo(func() {
 		if newValue {
 			if sess.setState(SessionStatePaused, badStates...) == SessionStateEstablished {
@@ -436,6 +448,13 @@ func (sess *Session) SetPause(newValue bool) (result bool) {
 			}
 		}
 	})
+
+	switch {
+	case !result:
+		err = newErrCannotPauseFromThisState()
+	case result && newValue:
+		err = sess.interruptRead()
+	}
 
 	return
 }
@@ -502,18 +521,29 @@ func (sess *Session) readerLoop() {
 	decryptedBuffer.Grow(uint(sess.GetMaxPacketSize()))
 
 	for !sess.isDone() {
-		sess.ifDebug(func() { sess.debugf("n, err := sess.backend.Read(inputBuffer)") })
-		sess.waitForUnpause()
 		sess.setIsReading(true)
+		sess.waitForUnpause()
+		sess.ifDebug(func() { sess.debugf("n, err := sess.backend.Read(inputBuffer)") })
 		n, err := sess.backend.Read(inputBuffer)
 		sess.setIsReading(false)
 		sess.ifDebug(func() {
-			sess.debugf("/n, err := sess.backend.Read(inputBuffer): %v | %v | %v", n, err, sess.state.Load())
+			sess.debugf("/n, err := sess.backend.Read(inputBuffer): %v | %T:%v | %v", n, err, err, sess.state.Load())
 		})
 		if err != nil {
 			if sess.isDone() {
 				return
 			}
+			if strings.Index(err.Error(), `i/o timeout`) != -1 { // TODO: find a more strict way to check this error
+				if atomic.LoadUint64(&sess.readInterruptsRequested) > sess.readInterruptsHappened {
+					sess.debugf("sess.backend.Read(): OK, it seems it just was an interrupt, try again...")
+					err = sess.setBackendReadDeadline(time.Now().Add(time.Hour * 24 * 365 * 100))
+					atomic.AddUint64(&sess.readInterruptsHappened, 1)
+				}
+			}
+			if err == nil {
+				continue
+			}
+
 			if !sess.eventHandler.Error(sess,
 				xerrors.Errorf("unable to read from the backend (state == %v): %w",
 					sess.state.Load(), err,
@@ -1037,7 +1067,10 @@ func (sess *Session) writeMessageAsync(
 			if sendInfo.incRefCount() == 1 {
 				panic(fmt.Sprintf("%+v", sendInfo))
 			}
-			sess.sendDelayedNowChan <- sendInfo
+			select {
+			case sess.sendDelayedNowChan <- sendInfo:
+			default:
+			}
 			return
 		}
 
@@ -1055,6 +1088,8 @@ func (sess *Session) writeMessageAsync(
 			defer ticker.Stop()
 			for {
 				select {
+				case <-sess.ctx.Done():
+					return
 				case <-sendInfo.c:
 					return
 				case <-ticker.C:
@@ -1536,6 +1571,47 @@ func (sess *Session) write(raw []byte) (int, error) {
 // Write implements io.Writer
 func (sess *Session) Write(p []byte) (int, error) {
 	return sess.write(p)
+}
+
+func (sess *Session) setBackendReadDeadline(deadline time.Time) (err error) {
+	defer func() {
+		if err != nil {
+			err = wrapError(err)
+		}
+	}()
+
+	if setReadDeadliner, ok := sess.backend.(interface{ SetReadDeadline(time.Time) error }); ok {
+		err = setReadDeadliner.SetReadDeadline(deadline)
+		if err != nil {
+			return
+		}
+		return
+	}
+
+	if setDeadliner, ok := sess.backend.(interface{ SetDeadline(time.Time) error }); ok {
+		err = setDeadliner.SetDeadline(deadline)
+		if err != nil {
+			return
+		}
+		return
+	}
+
+	return newErrCannotSetReadDeadline(sess.backend)
+}
+
+func (sess *Session) interruptRead() (err error) {
+	defer func() {
+		if err != nil {
+			err = wrapError(err)
+		}
+	}()
+	if !sess.IsReading() {
+		return nil
+	}
+	sess.debugf("interrupting the Read()")
+
+	atomic.AddUint64(&sess.readInterruptsRequested, 1)
+	return sess.setBackendReadDeadline(time.Now())
 }
 
 // Close implements io.Closer. It will send a signal to close the session,
