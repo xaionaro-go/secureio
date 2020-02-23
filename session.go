@@ -447,10 +447,13 @@ func (sess *Session) startBackendCloser() {
 			return
 		}
 
-		closeErr := sess.backend.Close()
-		sess.debugf("sess.backend.Close() -> %v: %v ?= %v; %v ?= %v",
-			closeErr, recvMsgCount, sess.options.DetachOnMessagesCount,
-			seqDecryptFailsCount, sess.options.DetachOnSequentialDecryptFailsCount)
+		if err := sess.interruptRead(); err != nil {
+			sess.infof("unable to interrupt the Read(), closing the backend ReadWriteCloser")
+			closeErr := sess.backend.Close()
+			sess.debugf("sess.backend.Close() -> %v: %v ?= %v; %v ?= %v",
+				closeErr, recvMsgCount, sess.options.DetachOnMessagesCount,
+				seqDecryptFailsCount, sess.options.DetachOnSequentialDecryptFailsCount)
+		}
 	}()
 }
 
@@ -526,6 +529,7 @@ func (sess *Session) waitForUnpause() {
 	}
 
 	sess.debugf("blocked readerLoop() by a pause, waiting...")
+	_ = sess.resetReadDeadline()
 	sess.pauseLocker.Lock()
 	sess.pauseLocker.Unlock()
 	sess.debugf("the blocking of readerLoop() by a pause has finished, continuing...")
@@ -549,11 +553,21 @@ func (sess *Session) setIsReading(v bool) {
 	atomic.StoreUint64(&sess.isReadingValue, newValue)
 }
 
+func (sess *Session) resetReadDeadline() (err error) {
+	if atomic.LoadUint64(&sess.readInterruptsRequested) <= atomic.LoadUint64(&sess.readInterruptsHappened) {
+		return
+	}
+	sess.debugf("sess.backend.Read(): OK, it seems it just was an interrupt, try again...")
+	err = sess.setBackendReadDeadline(time.Now().Add(time.Hour * 24 * 365 * 100))
+	atomic.AddUint64(&sess.readInterruptsHappened, 1)
+	return
+}
+
 func (sess *Session) readerLoop() {
 	defer func() {
 		sess.debugf("/readerLoop: %v %v", sess.state.Load(), sess.isDoneSlow())
 
-		sess.cancelFunc()
+		sess.startClosing()
 
 		for _, messenger := range sess.messenger {
 			if messenger == nil {
@@ -575,6 +589,7 @@ func (sess *Session) readerLoop() {
 		sess.debugf("secureio session closed")
 		close(sess.debugOutputChan)
 		close(sess.infoOutputChan)
+		_ = sess.resetReadDeadline()
 	}()
 
 	var inputBuffer = make([]byte, sess.GetMaxPacketSize())
@@ -1675,6 +1690,11 @@ func (sess *Session) interruptRead() (err error) {
 	return sess.setBackendReadDeadline(time.Now())
 }
 
+func (sess *Session) startClosing() {
+	sess.sendDelayedNow(0, true)
+	sess.cancelFunc()
+}
+
 // Close implements io.Closer. It will send a signal to close the session,
 // but it will return immediately (without waiting until everything will
 // finish).
@@ -1683,7 +1703,7 @@ func (sess *Session) Close() error {
 	case SessionStateClosed, SessionStateClosing:
 		return newErrAlreadyClosed()
 	}
-	sess.cancelFunc()
+	sess.startClosing()
 	return nil
 }
 

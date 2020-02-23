@@ -102,7 +102,11 @@ func (sendInfo *SendInfo) Release() {
 	select {
 	case <-sendInfo.c:
 	default:
-		panic("Release() was called on a non-finished sendInfo")
+		select {
+		case <-sendInfo.ctx.Done():
+		default:
+			panic("Release() was called on a non-finished sendInfo")
+		}
 	}
 	refCount := atomic.AddInt32(&sendInfo.refCount, -1)
 	if refCount != 0 {
@@ -120,7 +124,11 @@ func (sendInfo *SendInfo) String() string {
 		sendInfo.c, sendInfo.Err, sendInfo.N, sendInfo.sendID, atomic.LoadInt32(&sendInfo.refCount))
 }
 
-// Wait is just a synonym for `<-sendInfo.Done()`
+// Wait waits until message is send or until the context is cancelled
+// (for example if session is closed).
 func (sendInfo *SendInfo) Wait() {
-	<-sendInfo.Done()
+	select {
+	case <-sendInfo.Done():
+	case <-sendInfo.ctx.Done():
+	}
 }

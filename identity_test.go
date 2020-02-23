@@ -2,6 +2,7 @@ package secureio_test
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"sync"
 	"testing"
@@ -92,6 +93,7 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer fmt.Println("identity0.MutualConfirmationOfIdentity() finished")
 		keys0, err0 = identity0.MutualConfirmationOfIdentity(
 			ctx,
 			identity1,
@@ -107,6 +109,7 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer fmt.Println("identity1.MutualConfirmationOfIdentity() finished")
 		keys1, err1 = identity1.MutualConfirmationOfIdentity(
 			ctx,
 			identity0,

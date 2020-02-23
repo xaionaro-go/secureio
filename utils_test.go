@@ -75,9 +75,9 @@ func (p *pipeReadWriter) Write(b []byte) (int, error) {
 var testPairMutex sync.Mutex
 
 func readLogsOfSession(t *testing.T, enableInfo bool, sess *Session) {
-	fmt.Println("runned logger")
+	fmt.Println("runned loggers")
 	go func() {
-		defer fmt.Println("stopped logger")
+		defer fmt.Println("stopped debug logger")
 		for {
 			select {
 			case debugOutput, ok := <-sess.DebugOutputChan():
@@ -86,6 +86,13 @@ func readLogsOfSession(t *testing.T, enableInfo bool, sess *Session) {
 				}
 				fmt.Printf("D:%v:SID:%v: "+debugOutput.Format+"\n",
 					append([]interface{}{t.Name(), sess.ID().CreatedAt % 1000000}, debugOutput.Args...)...)
+			}
+		}
+	}()
+	go func() {
+		defer fmt.Println("stopped info logger")
+		for {
+			select {
 			case infoOutput, ok := <-sess.InfoOutputChan():
 				if !ok {
 					return

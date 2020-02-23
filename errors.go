@@ -264,10 +264,10 @@ func (err ErrAnswersModeMismatch) Error() string {
 // a session created over io.ReadWriteCloser which does not
 // implement any of methods: `SetReadDeadline` and `SetDeadline`.
 type ErrCannotSetReadDeadline struct {
-	Backend io.ReadWriteCloser
+	Backend io.ReadWriter
 }
 
-func newErrCannotSetReadDeadline(backend io.ReadWriteCloser) error {
+func newErrCannotSetReadDeadline(backend io.ReadWriter) error {
 	err := errors.New(ErrCannotSetReadDeadline{Backend: backend})
 	err.Traceback.CutOffFirstNLines += 2
 	return err
