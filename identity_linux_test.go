@@ -18,7 +18,7 @@ func TestMissedKeySeedMessage(t *testing.T) {
 	identity0, identity1, _, _ := testPair(t)
 
 	opts := &SessionOptions{}
-	opts.OnInitFuncs = []OnInitFunc{func(sess *Session) { readLogsOfSession(t, false, sess) }}
+	opts.OnInitFuncs = []OnInitFunc{func(sess *Session) { printLogsOfSession(t, false, sess) }}
 	opts.EnableDebug = true
 	opts.EnableInfo = true
 	opts.AllowReorderingAndDuplication = true                 // it's UDP :(

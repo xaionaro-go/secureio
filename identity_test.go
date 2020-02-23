@@ -19,7 +19,7 @@ func TestIdentityMutualConfirmationOfIdentityWithPSK(t *testing.T) {
 	opts := &SessionOptions{}
 
 	opts.KeyExchangerOptions.PSK = make([]byte, 64)
-	opts.OnInitFuncs = []OnInitFunc{func(sess *Session) { readLogsOfSession(t, true, sess) }}
+	opts.OnInitFuncs = []OnInitFunc{func(sess *Session) { printLogsOfSession(t, true, sess) }}
 	opts.EnableDebug = true
 	rand.Read(opts.KeyExchangerOptions.PSK)
 
@@ -75,8 +75,8 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 
 	opts0.KeyExchangerOptions.PSK = make([]byte, 64)
 	opts1.KeyExchangerOptions.PSK = make([]byte, 64)
-	opts0.OnInitFuncs = []OnInitFunc{func(sess *Session) { readLogsOfSession(t, false, sess) }}
-	opts1.OnInitFuncs = []OnInitFunc{func(sess *Session) { readLogsOfSession(t, false, sess) }}
+	opts0.OnInitFuncs = []OnInitFunc{func(sess *Session) { printLogsOfSession(t, false, sess) }}
+	opts1.OnInitFuncs = []OnInitFunc{func(sess *Session) { printLogsOfSession(t, false, sess) }}
 	opts0.EnableDebug = true
 	opts1.EnableDebug = true
 	rand.Read(opts0.KeyExchangerOptions.PSK)

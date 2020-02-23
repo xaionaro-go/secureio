@@ -1,5 +1,6 @@
 [![go report](https://goreportcard.com/badge/github.com/xaionaro-go/secureio)](https://goreportcard.com/report/github.com/xaionaro-go/secureio)
 [![GoDoc](https://godoc.org/github.com/xaionaro-go/secureio?status.svg)](https://godoc.org/github.com/xaionaro-go/secureio)
+[![Build Status](https://travis-ci.org/xaionaro-go/secureio.svg?branch=master)](https://travis-ci.org/xaionaro-go/secureio)
 [![Coverage Status](https://coveralls.io/repos/github/xaionaro-go/secureio/badge.svg?branch=master)](https://coveralls.io/github/xaionaro-go/secureio?branch=master)
 
 # Quick start

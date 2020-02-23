@@ -26,7 +26,7 @@ func TestSessionBigWrite(t *testing.T) {
 
 	opts := &SessionOptions{
 		OnInitFuncs: []OnInitFunc{func(sess *Session) {
-			readLogsOfSession(t, true, sess)
+			printLogsOfSession(t, true, sess)
 		}},
 		EnableDebug: true,
 	}
@@ -63,7 +63,7 @@ func TestSessionWaitForSendInfo(t *testing.T) {
 
 	opts := &SessionOptions{
 		OnInitFuncs: []OnInitFunc{func(sess *Session) {
-			readLogsOfSession(t, true, sess)
+			printLogsOfSession(t, true, sess)
 		}},
 		EnableDebug: true,
 	}
@@ -111,7 +111,7 @@ func TestSessionAsyncWrite(t *testing.T) {
 	sendLogger := &testLogger{t, nil}
 	opts := &SessionOptions{
 		OnInitFuncs: []OnInitFunc{func(sess *Session) {
-			readLogsOfSession(t, true, sess)
+			printLogsOfSession(t, true, sess)
 		}},
 		EnableDebug: true,
 	}
@@ -356,7 +356,7 @@ func TestHackerDuplicateMessage(t *testing.T) {
 
 	opts := &SessionOptions{
 		OnInitFuncs: []OnInitFunc{func(sess *Session) {
-			readLogsOfSession(t, true, sess)
+			printLogsOfSession(t, true, sess)
 		}},
 		EnableDebug: true,
 		KeyExchangerOptions: KeyExchangerOptions{

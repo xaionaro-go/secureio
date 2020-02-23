@@ -74,7 +74,7 @@ func (p *pipeReadWriter) Write(b []byte) (int, error) {
 
 var testPairMutex sync.Mutex
 
-func readLogsOfSession(t *testing.T, enableInfo bool, sess *Session) {
+func printLogsOfSession(t *testing.T, enableInfo bool, sess *Session) {
 	fmt.Println("runned loggers")
 	go func() {
 		defer fmt.Println("stopped debug logger")

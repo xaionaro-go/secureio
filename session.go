@@ -104,6 +104,7 @@ type Session struct {
 	sendDelayedNowChan       chan *SendInfo
 	sendDelayedCond          *sync.Cond
 	sendDelayedCondLocker    sync.Mutex
+	sendDelayedNowLocker     lockerMutex
 
 	lastSendInfoSendID uint64
 
@@ -122,6 +123,7 @@ type Session struct {
 	pauseLocker    sync.Mutex
 	isReadingValue uint64
 
+	readDeadlineLocker      lockerMutex
 	readInterruptsRequested uint64
 	readInterruptsHappened  uint64
 }
@@ -554,12 +556,14 @@ func (sess *Session) setIsReading(v bool) {
 }
 
 func (sess *Session) resetReadDeadline() (err error) {
-	if atomic.LoadUint64(&sess.readInterruptsRequested) <= atomic.LoadUint64(&sess.readInterruptsHappened) {
-		return
-	}
-	sess.debugf("sess.backend.Read(): OK, it seems it just was an interrupt, try again...")
-	err = sess.setBackendReadDeadline(time.Now().Add(time.Hour * 24 * 365 * 100))
-	atomic.AddUint64(&sess.readInterruptsHappened, 1)
+	sess.readDeadlineLocker.LockDo(func() {
+		sess.debugf("resetReadDeadline(): %v %v", sess.readInterruptsRequested, sess.readInterruptsHappened)
+		if sess.readInterruptsRequested <= sess.readInterruptsHappened {
+			return
+		}
+		err = sess.setBackendReadDeadline(time.Now().Add(time.Hour * 24 * 365 * 100))
+		sess.readInterruptsHappened = sess.readInterruptsRequested
+	})
 	return
 }
 
@@ -610,11 +614,15 @@ func (sess *Session) readerLoop() {
 				return
 			}
 			if strings.Index(err.Error(), `i/o timeout`) != -1 { // TODO: find a more strict way to check this error
-				if atomic.LoadUint64(&sess.readInterruptsRequested) > sess.readInterruptsHappened {
+				sess.debugf("sess.backend.Read(): an 'i/o timeout' error")
+				sess.readDeadlineLocker.LockDo(func() {
+					if sess.readInterruptsRequested <= sess.readInterruptsHappened {
+						return
+					}
 					sess.debugf("sess.backend.Read(): OK, it seems it just was an interrupt, try again...")
 					err = sess.setBackendReadDeadline(time.Now().Add(time.Hour * 24 * 365 * 100))
-					atomic.AddUint64(&sess.readInterruptsHappened, 1)
-				}
+					sess.readInterruptsHappened = sess.readInterruptsRequested
+				})
 			}
 			if err == nil {
 				continue
@@ -833,6 +841,9 @@ func (sess *Session) decrypt(
 	{
 		var done bool
 		for _, cipherKey := range sess.GetCipherKeys() {
+			if cipherKey == nil {
+				continue
+			}
 			if done, err = tryDecrypt(cipherKey); done || err != nil {
 				return
 			}
@@ -995,7 +1006,11 @@ func (sess *Session) GetCipherKeysWait() [][]byte {
 		return cipherKeys
 	}
 
-	<-sess.waitForCipherKeyChan
+	select {
+	case <-sess.waitForCipherKeyChan:
+	case <-sess.ctx.Done():
+		return nil
+	}
 	cipherKeys = sess.GetCipherKeys()
 	if cipherKeys == nil {
 		panic(`should not happened`)
@@ -1026,11 +1041,17 @@ func (sess *Session) WriteMessageAsync(
 
 	if msgType == messageTypeKeyExchange || sess.options.SendDelay == nil {
 		var cipherKey []byte
+		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 		if msgType != messageTypeKeyExchange {
-			cipherKey = sess.GetCipherKeysWait()[secretIDRecentBoth]
+			cipherKeys := sess.GetCipherKeysWait()
+			if cipherKeys == nil {
+				sendInfo.Err = newErrCanceled()
+				close(sendInfo.c)
+				return
+			}
+			cipherKey = cipherKeys[secretIDRecentBoth]
 		}
 		n, err := sess.writeMessageSync(cipherKey, hdr, payload)
-		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 		sendInfo.N = n
 		sendInfo.Err = err
 		close(sendInfo.c)
@@ -1091,7 +1112,15 @@ func (sess *Session) writeMessageAsync(
 
 	if sess.options.SendDelay == nil {
 		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
-		sendInfo.N, sendInfo.Err = sess.writeMessageSync(sess.GetCipherKeysWait()[secretIDRecentBoth], hdr, payload)
+		var cipherKey []byte
+		cipherKeys := sess.GetCipherKeysWait()
+		if cipherKeys == nil {
+			sendInfo.Err = newErrCanceled()
+			close(sendInfo.c)
+			return
+		}
+		cipherKey = cipherKeys[secretIDRecentBoth]
+		sendInfo.N, sendInfo.Err = sess.writeMessageSync(cipherKey, hdr, payload)
 		close(sendInfo.c)
 		return
 	}
@@ -1259,6 +1288,9 @@ func (sess *Session) sendDelayedNow(
 	delayedWriteBufLockID lockID,
 	isSync bool,
 ) uint64 {
+	sess.sendDelayedNowLocker.Lock()
+	defer sess.sendDelayedNowLocker.Unlock()
+
 	sess.ifDebug(func() { sess.debugf(`sendDelayedNow(%v, %v)`, delayedWriteBufLockID, isSync) })
 
 	// This lines should be before `SetMonopolized` because nothing
@@ -1315,7 +1347,11 @@ func (sess *Session) sendDelayedNow(
 func (sess *Session) sendDelayedNowSyncFromBuffer(buf *buffer) (int, error) {
 	messagesBytes := buf.Bytes
 
-	cipherKey := sess.GetCipherKeysWait()[secretIDRecentBoth]
+	cipherKeys := sess.GetCipherKeysWait()
+	if cipherKeys == nil {
+		return 0, newErrCanceled()
+	}
+	cipherKey := cipherKeys[secretIDRecentBoth]
 
 	containerHdr := sess.messagesContainerHeadersPool.AcquireMessagesContainerHeaders(sess)
 	err := containerHdr.Set(cipherKey, messagesBytes)
@@ -1686,12 +1722,15 @@ func (sess *Session) interruptRead() (err error) {
 	}
 	sess.debugf("interrupting the Read()")
 
-	atomic.AddUint64(&sess.readInterruptsRequested, 1)
+	sess.readDeadlineLocker.LockDo(func() {
+		sess.readInterruptsRequested++
+	})
 	return sess.setBackendReadDeadline(time.Now())
 }
 
 func (sess *Session) startClosing() {
-	sess.sendDelayedNow(0, true)
+	for sess.sendDelayedNow(0, true) == 0 {
+	}
 	sess.cancelFunc()
 }
 

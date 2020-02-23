@@ -6,7 +6,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"runtime"
 	"sync"
@@ -242,7 +241,7 @@ func (kx *keyExchanger) LockDo(fn func()) {
 func (kx *keyExchanger) generateSharedKey(
 	localPrivateKey *[curve25519PrivateKeySize]byte,
 	remotePublicKey *[curve25519PublicKeySize]byte,
-) ([]byte, error) {
+) ([]byte, *xerrors.Error) {
 	if localPrivateKey == nil {
 		return nil, newErrLocalPrivateKeyIsNil()
 	}
@@ -295,7 +294,7 @@ func (kx *keyExchanger) updateSecrets() (err error) {
 
 	newSecrets := make([][]byte, secretIDs)
 	for secretIdx := 0; secretIdx < secretIDs; secretIdx++ {
-		var genErr error
+		var genErr *xerrors.Error
 		var newSecret []byte
 		switch secretID(secretIdx) {
 		case secretIDRecentBoth:
@@ -308,8 +307,8 @@ func (kx *keyExchanger) updateSecrets() (err error) {
 			newSecret, genErr = kx.generateSharedKey(prevLocal, prevRemote)
 		}
 		if genErr != nil &&
-			!errors.As(genErr, &errLocalPrivateKeyIsNil{}) &&
-			!errors.As(genErr, &errRemotePublicKeyIsNil{}) {
+			genErr.Has(errLocalPrivateKeyIsNil{}) &&
+			genErr.Has(errRemotePublicKeyIsNil{}) {
 			return genErr
 		}
 		newSecrets[secretIdx] = newSecret

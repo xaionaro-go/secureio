@@ -226,7 +226,7 @@ func newErrMonopolized() error {
 	return err
 }
 func (err errMonopolized) Error() string {
-	return fmt.Sprintf("the payload is too big")
+	return fmt.Sprintf("buffer is monopolized (this is an internal error that should never be visible to anywhere outside of this package)")
 }
 
 // ErrCanceled is an error indicates that the action was canceled. It
@@ -294,7 +294,7 @@ func (err ErrCannotPauseOrUnpauseFromThisState) Error() string {
 
 type errLocalPrivateKeyIsNil struct{}
 
-func newErrLocalPrivateKeyIsNil() error {
+func newErrLocalPrivateKeyIsNil() *errors.Error {
 	err := errors.New(errLocalPrivateKeyIsNil{})
 	err.Traceback.CutOffFirstNLines += 2
 	return err
@@ -305,7 +305,7 @@ func (err errLocalPrivateKeyIsNil) Error() string {
 
 type errRemotePublicKeyIsNil struct{}
 
-func newErrRemotePublicKeyIsNil() error {
+func newErrRemotePublicKeyIsNil() *errors.Error {
 	err := errors.New(errRemotePublicKeyIsNil{})
 	err.Traceback.CutOffFirstNLines += 2
 	return err
