@@ -32,7 +32,9 @@ func TestMissedKeySeedMessage(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		key, err := identity0.MutualConfirmationOfIdentity(ctx, identity1, conn0, &testLogger{t, nil}, opts)
-		assert.Equal(t, 32, len(key))
+		if assert.Equal(t, 4, len(key)) {
+			assert.Equal(t, 32, len(key[0]))
+		}
 		assert.NoError(t, err)
 	}()
 
@@ -52,7 +54,9 @@ func TestMissedKeySeedMessage(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		key, err := identity1.MutualConfirmationOfIdentity(ctx, identity0, conn1, &testLogger{t, nil}, opts)
-		assert.Equal(t, 32, len(key))
+		if assert.Equal(t, 4, len(key)) {
+			assert.Equal(t, 32, len(key[0]))
+		}
 		assert.NoError(t, err)
 	}()
 

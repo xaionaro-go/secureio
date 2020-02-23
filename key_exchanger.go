@@ -7,11 +7,13 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"runtime"
 	"sync"
 	"time"
 
 	"github.com/aead/ecdh"
+	"github.com/xaionaro-go/bytesextra"
 	"golang.org/x/crypto/sha3"
 
 	xerrors "github.com/xaionaro-go/errors"
@@ -46,6 +48,8 @@ const (
 )
 
 var (
+	// LittleEndian is the most popular architecture family, so
+	// to preserve more performance in the most cases we is it:
 	binaryOrderType = binary.LittleEndian
 
 	// Salt is used to append PSKs. If you change this value then
@@ -53,31 +57,47 @@ var (
 	Salt = []byte(`xaionaro-go/secureio.KeyExchanger`)
 )
 
+type secretID uint
+
+const (
+	secretIDRecentBoth = secretID(iota)
+	secretIDRecentLocal
+	secretIDRecentRemote
+	secretIDPrevious
+
+	_secretIDs
+	secretIDs = int(_secretIDs)
+)
+
 type keyExchanger struct {
 	locker sync.RWMutex
 
-	ctx           context.Context
-	cancelFunc    func()
-	setSecretFunc func([]byte)
-	doneFunc      func()
-	errFunc       func(error)
-	options       KeyExchangerOptions
+	ctx            context.Context
+	cancelFunc     func()
+	setSecretsFunc func([][]byte)
+	doneFunc       func()
+	errFunc        func(error)
+	options        KeyExchangerOptions
 
-	failCount                  uint
-	lastExchangeTS             time.Time
-	nextLocalKeyLocker         lockerRWMutex
-	nextLocalPrivateKey        *[curve25519PrivateKeySize]byte
-	nextLocalPublicKey         *[curve25519PublicKeySize]byte
-	remoteKeySeedUpdateMessage keySeedUpdateMessage
-	localIdentity              *Identity
-	remoteIdentity             *Identity
-	messenger                  *Messenger
-	ecdh                       ecdh.KeyExchange
+	failCount           uint
+	lastExchangeTS      time.Time
+	keyLocker           lockerRWMutex
+	prevRemotePublicKey *[curve25519PublicKeySize]byte
+	nextRemotePublicKey *[curve25519PublicKeySize]byte
+	prevLocalPrivateKey *[curve25519PrivateKeySize]byte
+	nextLocalPrivateKey *[curve25519PrivateKeySize]byte
+	nextLocalPublicKey  *[curve25519PublicKeySize]byte
+	localIdentity       *Identity
+	remoteIdentity      *Identity
+	messenger           *Messenger
+	ecdh                ecdh.KeyExchange
 
-	keyID             uint64
-	nextKeyID         uint64
-	successNotifyChan chan uint64
-	keyUpdateLocker   lockerRWMutex
+	remoteSessionID       *SessionID
+	remoteKeyID           uint64
+	localKeyCreatedAt     uint64
+	nextLocalKeyCreatedAt uint64
+	successNotifyChan     chan uint64
+	keyUpdateLocker       lockerRWMutex
 }
 
 // KeyExchangerOptions is used to configure the key exchanging options.
@@ -92,6 +112,17 @@ type KeyExchangerOptions struct {
 	//
 	// If a zero-value then DefaultKeyExchangeInterval is used.
 	KeyUpdateInterval time.Duration
+
+	// maximalTimeDifference enables check of how sane are timestamps
+	// are being received from the remote side. If the timestamp
+	// is from far past or from far future it may be considered as
+	// a hack attempt.
+	//
+	// By default this check is disabled. To enable it set
+	// a non-zero value. The value defines how big could be the
+	// legitimate difference between local clock and remote clock.
+	// The time difference should include possible network delays.
+	maximalTimeDifference time.Duration
 
 	// RetryInterval defines the maximal delay between sending a key exchange
 	// packet and success key exchange before resending the key exchange
@@ -113,7 +144,7 @@ type KeyExchangerOptions struct {
 	// satisfy both conditions: valid (and expected) identities and the same PSK.
 	PSK []byte
 
-	// AnswerMode set the behavior of key-exchange message acknowledgments.
+	// AnswersMode set the behavior of key-exchange message acknowledgments.
 	//
 	// When the local side receives a packet from the remote side it _may_
 	// send a key exchange packet even if it was already sent before. This
@@ -127,11 +158,11 @@ type KeyExchangerOptions struct {
 	AnswersMode KeyExchangeAnswersMode
 }
 
-// KeyExchangeAnswersMode is the variable type for KeyExchangeOptions.AnswerMode
+// KeyExchangeAnswersMode is the variable type for KeyExchangeOptions.AnswersMode
 type KeyExchangeAnswersMode uint8
 
 const (
-	// KeyExchangeAnswersModeDefault means use the default value of AnswerMode
+	// KeyExchangeAnswersModeDefault means use the default value of AnswersMode
 	KeyExchangeAnswersModeDefault = KeyExchangeAnswersMode(iota)
 
 	// KeyExchangeAnswersModeAnswerAndWait makes the key exchanger to send
@@ -153,13 +184,13 @@ func newKeyExchanger(
 	localIdentity *Identity,
 	remoteIdentity *Identity,
 	messenger *Messenger,
-	setSecretFunc func([]byte),
+	setSecretsFunc func([][]byte),
 	doneFunc func(),
 	errFunc func(error),
 	opts *KeyExchangerOptions,
 ) *keyExchanger {
 	kx := &keyExchanger{
-		setSecretFunc:     setSecretFunc,
+		setSecretsFunc:    setSecretsFunc,
 		doneFunc:          doneFunc,
 		errFunc:           errFunc,
 		localIdentity:     localIdentity,
@@ -211,7 +242,18 @@ func (kx *keyExchanger) generateSharedKey(
 	localPrivateKey *[curve25519PrivateKeySize]byte,
 	remotePublicKey *[curve25519PublicKeySize]byte,
 ) ([]byte, error) {
+	if localPrivateKey == nil {
+		return nil, newErrLocalPrivateKeyIsNil()
+	}
+	if remotePublicKey == nil {
+		return nil, newErrRemotePublicKeyIsNil()
+	}
+
 	key := kx.ecdh.ComputeSecret(localPrivateKey, remotePublicKey)
+	var zeroKey [32]byte
+	if bytes.Compare(key, zeroKey[:]) == 0 {
+		panic(fmt.Sprintf("should not happen: %v %v", localPrivateKey, remotePublicKey))
+	}
 
 	psk := kx.options.PSK
 	if len(psk) > 0 {
@@ -236,48 +278,115 @@ func (kx *keyExchanger) isDone() bool {
 	}
 }
 
-func (kx *keyExchanger) Handle(b []byte) (err error) {
+func (kx *keyExchanger) updateSecrets() (err error) {
+	defer func() { err = wrapError(err) }()
+
+	var prevRemote *[curve25519PublicKeySize]byte
+	var nextRemote *[curve25519PublicKeySize]byte
+	var prevLocal *[curve25519PrivateKeySize]byte
 	var nextLocal *[curve25519PrivateKeySize]byte
-	kx.nextLocalKeyLocker.RLockDo(func() {
+	kx.keyLocker.RLockDo(func() {
+		prevRemote = kx.prevRemotePublicKey
+		nextRemote = kx.nextRemotePublicKey
+		prevLocal = kx.prevLocalPrivateKey
 		nextLocal = kx.nextLocalPrivateKey
 	})
+
+	newSecrets := make([][]byte, secretIDs)
+	for secretIdx := 0; secretIdx < secretIDs; secretIdx++ {
+		var genErr error
+		var newSecret []byte
+		switch secretID(secretIdx) {
+		case secretIDRecentBoth:
+			newSecret, genErr = kx.generateSharedKey(nextLocal, nextRemote)
+		case secretIDRecentLocal:
+			newSecret, genErr = kx.generateSharedKey(nextLocal, prevRemote)
+		case secretIDRecentRemote:
+			newSecret, genErr = kx.generateSharedKey(prevLocal, nextRemote)
+		case secretIDPrevious:
+			newSecret, genErr = kx.generateSharedKey(prevLocal, prevRemote)
+		}
+		if genErr != nil &&
+			!errors.As(genErr, &errLocalPrivateKeyIsNil{}) &&
+			!errors.As(genErr, &errRemotePublicKeyIsNil{}) {
+			return genErr
+		}
+		newSecrets[secretIdx] = newSecret
+	}
+
+	kx.messenger.sess.debugf("[kx] set the secrets")
+	kx.setSecretsFunc(newSecrets)
+	return nil
+}
+
+func (kx *keyExchanger) Handle(b []byte) (err error) {
+	defer func() { err = wrapError(err) }()
+
+	if len(b) < keySeedUpdateMessageSignedSize {
+		return newErrTooShort(uint(keySeedUpdateMessageSignedSize), uint(len(b)))
+	}
+
+	signature := b[:keySignatureSize]
+	msgBytes := b[keySignatureSize:keySeedUpdateMessageSignedSize]
+	if len(b) > keySeedUpdateMessageSignedSize {
+		kx.messenger.sess.debugf("[kx] ignored the tail of length %v", keySeedUpdateMessageSignedSize-len(b))
+	}
+	if err = kx.remoteIdentity.VerifySignature(signature, msgBytes); err != nil {
+		kx.messenger.sess.debugf("[kx] ignoring the message due to the wrong signature: %v", err)
+		return
+	}
+
+	var msg keySeedUpdateMessage
+	err = binary.Read(bytes.NewBuffer(msgBytes), binaryOrderType, &msg)
+	if err != nil {
+		return
+	}
+
+	if msg.AnswersMode != kx.options.AnswersMode {
+		kx.messenger.sess.debugf("[kx] msg == %+v; msgBytes == %v; b == %v", msg, msgBytes, b)
+		kx.errFunc(newErrAnswersModeMismatch(kx.options.AnswersMode, msg.AnswersMode))
+	}
+
+	{
+		var zeroKey [curve25519PublicKeySize]byte
+		if bytes.Compare(msg.PublicKey[:], zeroKey[:]) == 0 {
+			kx.errFunc(newErrInvalidPublicKey())
+			return
+		}
+	}
+
+	kx.messenger.sess.debugf("[kx] received msg: %+v", msg)
 	kx.LockDo(func() {
 		defer func() { err = wrapError(err) }()
 
-		msg := &kx.remoteKeySeedUpdateMessage
-		err = binary.Read(bytes.NewBuffer(b), binaryOrderType, msg)
-		if err != nil {
-			return
-		}
-		if err = kx.remoteIdentity.VerifySignature(msg.Signature[:], msg.PublicKey[:]); err != nil {
-			kx.messenger.sess.debugf("[kx] wrong signature: %v", err)
-			return
-		}
-		if nextLocal == nil {
-			return // Not ready, yet. It's required to call KeyUpdateSendWait(), first
-		}
-		nextRemote := &msg.PublicKey
-		nextKey, genErr := kx.generateSharedKey(nextLocal, nextRemote)
-		if genErr != nil {
-			_ = kx.Close()
-			if !errors.As(genErr, &ErrAlreadyClosed{}) || !kx.isDone() {
-				kx.errFunc(wrapError(genErr))
+		nextRemoteHasChanged := true
+		kx.keyLocker.LockDo(func() {
+			if kx.nextRemotePublicKey != nil &&
+				bytes.Compare((*kx.nextRemotePublicKey)[:], msg.PublicKey[:]) == 0 {
+				nextRemoteHasChanged = false
+				return
 			}
+			kx.nextRemotePublicKey = &msg.PublicKey
+		})
+		if !nextRemoteHasChanged {
+			//kx.errFunc(newErrRemoteKeyHasNotChanged())
+			//return
+		}
+
+		err = kx.updateSecrets()
+		if err != nil {
+			kx.errFunc(wrapError(err))
 			return
 		}
 
-		if msg.AnswersMode != kx.options.AnswersMode {
-			kx.errFunc(newErrAnswersModeMismatch(kx.options.AnswersMode, msg.AnswersMode))
-		}
-
-		kx.messenger.sess.debugf("[kx] set the secret")
-		kx.setSecretFunc(nextKey)
 		if msg.Flags.IsAnswer() || kx.options.AnswersMode != KeyExchangeAnswersModeAnswerAndWait {
+			kx.remoteSessionID = &msg.SessionID
 			kx.lastExchangeTS = time.Now()
 			kx.sendSuccessNotifications()
 		}
 
 		if !msg.Flags.IsAnswer() && kx.options.AnswersMode != KeyExchangeAnswersModeDisable {
+			// Send answer
 			go func() {
 				kx.mustSendPublicKey(true)
 			}()
@@ -287,20 +396,20 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 }
 
 func (kx *keyExchanger) sendSuccessNotifications() {
-	var nextKeyID uint64
-	kx.nextLocalKeyLocker.RLockDo(func() {
-		nextKeyID = kx.nextKeyID
-		kx.keyID = nextKeyID
+	var localNextKeyID uint64
+	kx.keyLocker.RLockDo(func() {
+		localNextKeyID = kx.nextLocalKeyCreatedAt
+		kx.localKeyCreatedAt = localNextKeyID
 	})
 	func() {
 		defer func() { recover() }() // just in case; TODO: remove this line
 		select {
 		case <-kx.ctx.Done():
-		case kx.successNotifyChan <- nextKeyID:
+		case kx.successNotifyChan <- localNextKeyID:
 		default:
 		}
 	}()
-	kx.messenger.sess.debugf("[kx] a successful key exchange, keyID == %v", nextKeyID)
+	kx.messenger.sess.debugf("[kx] a successful key exchange, localKeyCreatedAt == %v", localNextKeyID)
 
 	kx.doneFunc()
 }
@@ -337,30 +446,10 @@ func (kx *keyExchanger) loop() {
 	}
 }
 
-func (kx *keyExchanger) mustSendPublicKey(isAnswer bool) {
-	err := kx.sendPublicKey(isAnswer)
-	if err != nil {
-		_ = kx.Close()
-		kx.errFunc(xerrors.Errorf("[kx] unable to send a public key: %w", err))
-	}
-}
-
-func (kx *keyExchanger) sendPublicKey(isAnswer bool) error {
-	kx.messenger.sess.debugf("[kx] kx.sendPublicKey(isAnswer: %v)", isAnswer)
-	msg := &keySeedUpdateMessage{}
-	kx.nextLocalKeyLocker.RLockDo(func() {
-		copy(msg.PublicKey[:], (*kx.nextLocalPublicKey)[:])
-	})
-	kx.localIdentity.Sign(msg.Signature[:], msg.PublicKey[:])
-	msg.Flags.SetIsAnswer(isAnswer)
-	msg.AnswersMode = kx.options.AnswersMode
-	return kx.send(msg)
-}
-
 func (kx *keyExchanger) updateKey() (result uint64) {
 	var isAlreadyInProgress bool
-	kx.nextLocalKeyLocker.RLockDo(func() {
-		isAlreadyInProgress = kx.nextKeyID > kx.keyID
+	kx.keyLocker.RLockDo(func() {
+		isAlreadyInProgress = kx.nextLocalKeyCreatedAt > kx.localKeyCreatedAt
 	})
 	if isAlreadyInProgress {
 		panic("isAlreadyInProgress")
@@ -374,11 +463,14 @@ func (kx *keyExchanger) updateKey() (result uint64) {
 	}
 	privKeyCasted := privKey.([curve25519PrivateKeySize]byte)
 	pubKeyCasted := pubKey.([curve25519PublicKeySize]byte)
-	kx.nextLocalKeyLocker.LockDo(func() {
+	kx.keyLocker.LockDo(func() {
 		kx.nextLocalPrivateKey = &privKeyCasted
 		kx.nextLocalPublicKey = &pubKeyCasted
-		kx.nextKeyID = kx.keyID + 1
-		result = kx.nextKeyID
+		kx.nextLocalKeyCreatedAt = uint64(time.Now().UnixNano())
+		if kx.nextLocalKeyCreatedAt <= kx.localKeyCreatedAt { // could happen due to time re-synchronization
+			kx.nextLocalKeyCreatedAt = kx.localKeyCreatedAt + 1
+		}
+		result = kx.nextLocalKeyCreatedAt
 	})
 
 	return
@@ -402,10 +494,10 @@ func (kx *keyExchanger) KeyUpdateSendWait() {
 			break
 		}
 
-		// Update the key (and increase nextKeyID)
-		nextKeyID := kx.updateKey()
-		kx.messenger.sess.debugf("[kx] nextKeyID == %v", nextKeyID)
-		if nextKeyID == 0 {
+		// Update the key (and increase nextKeyCreatedAt)
+		nextKeyCreatedAt := kx.updateKey()
+		kx.messenger.sess.debugf("[kx] nextKeyCreatedAt == %v", nextKeyCreatedAt)
+		if nextKeyCreatedAt == 0 {
 			return
 		}
 
@@ -421,19 +513,19 @@ func (kx *keyExchanger) KeyUpdateSendWait() {
 			case <-kx.ctx.Done():
 				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: done")
 				return
-			case newKeyID, ok := <-kx.successNotifyChan:
-				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: success (keyID == %v)", newKeyID)
+			case newKeyCreatedAt, ok := <-kx.successNotifyChan:
+				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: success (keyCreatedAt == %v)", newKeyCreatedAt)
 				if !ok {
 					return
 				}
-				if newKeyID > nextKeyID {
-					panic(`newKeyID > nextKeyID`)
+				if newKeyCreatedAt > nextKeyCreatedAt {
+					panic(`newKeyCreatedAt > nextKeyCreatedAt`)
 				}
-				if newKeyID == nextKeyID {
+				if newKeyCreatedAt == nextKeyCreatedAt {
 					return
 				}
 			case <-retryTicker.C:
-				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: retry (waiting for keyID == %v)", nextKeyID)
+				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: retry (waiting for keyCreatedAt == %v)", nextKeyCreatedAt)
 				runtime.Gosched()
 				kx.mustSendPublicKey(false)
 			case <-timeoutTimer.C:
@@ -446,10 +538,43 @@ func (kx *keyExchanger) KeyUpdateSendWait() {
 	})
 }
 
-func (kx *keyExchanger) send(msg *keySeedUpdateMessage) error {
-	err := binary.Write(kx.messenger, binaryOrderType, msg)
+func (kx *keyExchanger) mustSendPublicKey(isAnswer bool) {
+	err := kx.sendPublicKey(isAnswer)
 	if err != nil {
-		return xerrors.Errorf("unable to send keySeedUpdateMessage: %w", err)
+		_ = kx.Close()
+		kx.errFunc(xerrors.Errorf("[kx] unable to send a public key: %w", err))
 	}
+}
+
+func (kx *keyExchanger) sendPublicKey(isAnswer bool) error {
+	kx.messenger.sess.debugf("[kx] kx.sendPublicKey(isAnswer: %v)", isAnswer)
+	msg := &keySeedUpdateMessage{}
+	msg.SessionID = kx.messenger.sess.id
+	kx.keyLocker.RLockDo(func() {
+		copy(msg.PublicKey[:], (*kx.nextLocalPublicKey)[:])
+	})
+	msg.Flags.SetIsAnswer(isAnswer)
+	msg.AnswersMode = kx.options.AnswersMode
+	return kx.send(msg)
+}
+
+func (kx *keyExchanger) send(msg *keySeedUpdateMessage) error {
+	buf := bytesextra.NewWriter(make([]byte, keySeedUpdateMessageSignedSize))
+	buf.CurrentPosition = keySignatureSize
+	err := binary.Write(buf, binaryOrderType, msg)
+	if err != nil {
+		return fmt.Errorf("unable to encode keySeedUpdateMessage: %w", err)
+	}
+	bufBytes := buf.Storage
+	kx.localIdentity.Sign(bufBytes[:keySignatureSize], bufBytes[keySignatureSize:])
+
+	n, err := kx.messenger.Write(bufBytes)
+	if err != nil {
+		return fmt.Errorf("unable to send keySeedUpdateMessage: %w", err)
+	}
+	if n != len(bufBytes) {
+		return newErrPartialWrite()
+	}
+
 	return nil
 }

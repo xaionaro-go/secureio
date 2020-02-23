@@ -28,11 +28,11 @@ func TestIdentityMutualConfirmationOfIdentityWithPSK(t *testing.T) {
 	var wg sync.WaitGroup
 
 	var err0 error
-	var key0 []byte
+	var keys0 [][]byte
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		key0, err0 = identity0.MutualConfirmationOfIdentity(
+		keys0, err0 = identity0.MutualConfirmationOfIdentity(
 			ctx,
 			identity1,
 			conn0,
@@ -42,11 +42,11 @@ func TestIdentityMutualConfirmationOfIdentityWithPSK(t *testing.T) {
 	}()
 
 	var err1 error
-	var key1 []byte
+	var keys1 [][]byte
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		key1, err1 = identity1.MutualConfirmationOfIdentity(
+		keys1, err1 = identity1.MutualConfirmationOfIdentity(
 			ctx,
 			identity0,
 			conn1,
@@ -59,7 +59,7 @@ func TestIdentityMutualConfirmationOfIdentityWithPSK(t *testing.T) {
 
 	assert.NoError(t, err0)
 	assert.NoError(t, err1)
-	assert.Equal(t, key0, key1)
+	assert.Equal(t, keys0, keys1)
 
 	testConnIsOpen(t, conn0, conn1)
 }
@@ -88,11 +88,11 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 	var wg sync.WaitGroup
 
 	var err0 error
-	var key0 []byte
+	var keys0 [][]byte
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		key0, err0 = identity0.MutualConfirmationOfIdentity(
+		keys0, err0 = identity0.MutualConfirmationOfIdentity(
 			ctx,
 			identity1,
 			conn0,
@@ -103,11 +103,11 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 	}()
 
 	var err1 error
-	var key1 []byte
+	var keys1 [][]byte
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		key1, err1 = identity1.MutualConfirmationOfIdentity(
+		keys1, err1 = identity1.MutualConfirmationOfIdentity(
 			ctx,
 			identity0,
 			conn1,
@@ -121,8 +121,8 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 
 	assert.Error(t, err0)
 	assert.Error(t, err1)
-	assert.Nil(t, key0)
-	assert.Nil(t, key1)
+	assert.Nil(t, keys0)
+	assert.Nil(t, keys1)
 
 	testConnIsOpen(t, conn0, conn1)
 }

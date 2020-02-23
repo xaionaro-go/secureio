@@ -33,12 +33,14 @@ type testLogger struct {
 func (l *testLogger) Error(sess *Session, err error) bool {
 	xerr := err.(*errors.Error)
 	if xerr.Has(&net.OpError{}) {
+		fmt.Printf("D:%v:SID:%v: network error %v\n",
+			l.T.Name(), sess.ID().CreatedAt%1000000, xerr)
 		return true // For test TestMissedKeySeedMessage
 	}
 	if xerr.Has(io.EOF) || xerr.Has(ErrAlreadyClosed{}) {
 		return false
 	}
-	l.T.Errorf("E:%v:SID:%v:%v", l.T.Name(), sess.ID(), xerr)
+	l.T.Errorf("E:%v:SID:%v:%v", l.T.Name(), sess.ID().CreatedAt%1000000, xerr)
 	return false
 }
 func (l *testLogger) OnConnect(sess *Session) {
@@ -83,14 +85,14 @@ func readLogsOfSession(t *testing.T, enableInfo bool, sess *Session) {
 					return
 				}
 				fmt.Printf("D:%v:SID:%v: "+debugOutput.Format+"\n",
-					append([]interface{}{t.Name(), sess.ID()}, debugOutput.Args...)...)
+					append([]interface{}{t.Name(), sess.ID().CreatedAt % 1000000}, debugOutput.Args...)...)
 			case infoOutput, ok := <-sess.InfoOutputChan():
 				if !ok {
 					return
 				}
 				if !enableInfo {
 					fmt.Printf("I:%v:SID:%v: "+infoOutput.Format+"\n",
-						append([]interface{}{t.Name(), sess.ID()}, infoOutput.Args...)...)
+						append([]interface{}{t.Name(), sess.ID().CreatedAt % 1000000}, infoOutput.Args...)...)
 					return
 				}
 				t.Errorf("[I] "+infoOutput.Format, infoOutput.Args...)

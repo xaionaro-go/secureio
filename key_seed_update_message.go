@@ -1,8 +1,27 @@
 package secureio
 
+import (
+	"encoding/binary"
+)
+
+var (
+	keySeedUpdateMessageContainerSize = binary.Size(keySeedUpdateMessageContainer{})
+	keySeedUpdateMessageSignedSize    = binary.Size(keySeedUpdateMessageSigned{})
+)
+
+type keySeedUpdateMessageContainer struct {
+	KeyID uint64
+	keySeedUpdateMessageSigned
+}
+
+type keySeedUpdateMessageSigned struct {
+	Signature [keySignatureSize]byte
+	keySeedUpdateMessage
+}
+
 type keySeedUpdateMessage struct {
+	SessionID   SessionID
 	PublicKey   [curve25519PublicKeySize]byte
-	Signature   [keySignatureSize]byte
 	AnswersMode KeyExchangeAnswersMode
 	Flags       keySeedUpdateMessageFlags
 }

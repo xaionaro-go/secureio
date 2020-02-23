@@ -243,6 +243,8 @@ func (err ErrCanceled) Error() string {
 	return fmt.Sprintf("canceled")
 }
 
+// ErrAnswersModeMismatch is reported when local and remote side
+// has different settings of KeyExchangerOptions.AnswersMode
 type ErrAnswersModeMismatch struct {
 	AnswersModeLocal  KeyExchangeAnswersMode
 	AnswersModeRemote KeyExchangeAnswersMode
@@ -257,6 +259,10 @@ func (err ErrAnswersModeMismatch) Error() string {
 	return fmt.Sprintf("[kx] AnswersMode does not match: local:%v != remote:%v", err.AnswersModeLocal, err.AnswersModeRemote)
 }
 
+// ErrCannotSetReadDeadline is returned if it was an attempt
+// to use "Detach" (see SessionOptions) functions or "SetPause" on
+// a session created over io.ReadWriteCloser which does not
+// implement any of methods: `SetReadDeadline` and `SetDeadline`.
 type ErrCannotSetReadDeadline struct {
 	Backend io.ReadWriteCloser
 }
@@ -270,13 +276,63 @@ func (err ErrCannotSetReadDeadline) Error() string {
 	return fmt.Sprintf("do not know how to set ReadDeadline on %T", err.Backend)
 }
 
-type ErrCannotPauseFromThisState struct{}
+// ErrCannotPauseOrUnpauseFromThisState is returned by SetPause()
+// if the session is not in a required state.
+//
+// To pause a session it must be in state SessionStateEstablished.
+// To unpause a session it must be in state SessionStatePaused.
+type ErrCannotPauseOrUnpauseFromThisState struct{}
 
-func newErrCannotPauseFromThisState() error {
-	err := errors.New(ErrCannotPauseFromThisState{})
+func newErrCannotPauseOrUnpauseFromThisState() error {
+	err := errors.New(ErrCannotPauseOrUnpauseFromThisState{})
 	err.Traceback.CutOffFirstNLines += 2
 	return err
 }
-func (err ErrCannotPauseFromThisState) Error() string {
-	return fmt.Sprintf("cannot pause from this state")
+func (err ErrCannotPauseOrUnpauseFromThisState) Error() string {
+	return fmt.Sprintf("cannot pause/unpause from this state")
+}
+
+type errLocalPrivateKeyIsNil struct{}
+
+func newErrLocalPrivateKeyIsNil() error {
+	err := errors.New(errLocalPrivateKeyIsNil{})
+	err.Traceback.CutOffFirstNLines += 2
+	return err
+}
+func (err errLocalPrivateKeyIsNil) Error() string {
+	return fmt.Sprintf("[curve25519] local private key is nil")
+}
+
+type errRemotePublicKeyIsNil struct{}
+
+func newErrRemotePublicKeyIsNil() error {
+	err := errors.New(errRemotePublicKeyIsNil{})
+	err.Traceback.CutOffFirstNLines += 2
+	return err
+}
+func (err errRemotePublicKeyIsNil) Error() string {
+	return fmt.Sprintf("[curve25519] remote public key is nil")
+}
+
+type errRemoteKeyHasNotChanged struct{}
+
+func newErrRemoteKeyHasNotChanged() error {
+	err := errors.New(errRemoteKeyHasNotChanged{})
+	err.Traceback.CutOffFirstNLines += 2
+	return err
+}
+
+func (err errRemoteKeyHasNotChanged) Error() string {
+	return fmt.Sprintf("[kx] remote key has not changed")
+}
+
+type errInvalidPublicKey struct{}
+
+func newErrInvalidPublicKey() error {
+	err := errors.New(errInvalidPublicKey{})
+	err.Traceback.CutOffFirstNLines += 2
+	return err
+}
+func (err errInvalidPublicKey) Error() string {
+	return fmt.Sprintf("[kx] invalid public key")
 }

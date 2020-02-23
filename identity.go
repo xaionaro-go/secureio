@@ -266,7 +266,7 @@ func (i *Identity) MutualConfirmationOfIdentity(
 	backend io.ReadWriteCloser,
 	eventHandler EventHandler,
 	options *SessionOptions,
-) (ephemeralKey []byte, xerr error) {
+) (ephemeralKeys [][]byte, xerr error) {
 	var n int
 
 	var opts SessionOptions
@@ -329,7 +329,7 @@ func (i *Identity) MutualConfirmationOfIdentity(
 		return
 	}
 
-	ephemeralKey = sess.GetEphemeralKey()
+	ephemeralKeys = sess.GetEphemeralKeys()
 	return
 }
 

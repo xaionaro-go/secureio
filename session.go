@@ -3,9 +3,12 @@ package secureio
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	mathrand "math/rand"
 	"runtime"
 	"strings"
 	"sync"
@@ -42,6 +45,20 @@ func roundSize(size, blockSize uint32) uint32 {
 	return (size + (blockSize - 1)) & ^(blockSize - 1)
 }
 
+// SessionID is the struct to represent an unique Session ID.
+// CreateAt always grows (in never repeats within an application instance).
+type SessionID struct {
+	CreatedAt uint64
+	Random    uint64
+}
+
+// Bytes returns SessionID as a byte array.
+func (sessID *SessionID) Bytes() (result [16]byte) {
+	binaryOrderType.PutUint64(result[0:], sessID.CreatedAt)
+	binaryOrderType.PutUint64(result[8:], sessID.Random)
+	return
+}
+
 // Session is an encrypted communication session which:
 // * Verifies the remote side.
 // * Uses ephemeral encryption keys ("cipher key") to encrypt/decrypt the traffic.
@@ -53,7 +70,7 @@ func roundSize(size, blockSize uint32) uint32 {
 type Session struct {
 	locker sync.RWMutex
 
-	id             uint64
+	id             SessionID
 	ctx            context.Context
 	cancelFunc     context.CancelFunc
 	state          *sessionStateStorage
@@ -66,9 +83,8 @@ type Session struct {
 	backend              io.ReadWriteCloser
 	messenger            [MessageTypeMax]*Messenger
 	ReadChan             [MessageTypeMax]chan *readItem
-	currentSecret        []byte
-	cipherKey            *[]byte
-	previousCipherKey    *[]byte
+	currentSecrets       [][]byte
+	cipherKeys           *[][]byte
 	waitForCipherKeyChan chan struct{}
 	eventHandler         EventHandler
 	stopWaitGroup        sync.WaitGroup
@@ -103,8 +119,8 @@ type Session struct {
 
 	nextPacketID uint64
 
-	pauseLocker sync.Mutex
-	isReading   uint64
+	pauseLocker    sync.Mutex
+	isReadingValue uint64
 
 	readInterruptsRequested uint64
 	readInterruptsHappened  uint64
@@ -142,6 +158,8 @@ type SessionOptions struct {
 
 	// DetachOnMessagesCount is an amount of incoming messages after which
 	// a Session will detach from the backend and close itself.
+	// To use this feature the backend Reader should have
+	// method SetReadDeadline or SetDeadline.
 	//
 	// If it is set to a zero-value then "never".
 	DetachOnMessagesCount uint64
@@ -149,6 +167,8 @@ type SessionOptions struct {
 	// DetachOnSequentialDecryptFailsCount is an amount of sequential incoming
 	// messages failed to be decrypted after which a Session will detach from
 	// the backend and close itself.
+	// To use this feature the backend Reader should have
+	// method SetReadDeadline or SetDeadline.
 	//
 	// If it is set to a zero-value then "never".
 	DetachOnSequentialDecryptFailsCount uint64
@@ -232,7 +252,47 @@ func panicIf(err error) {
 	}
 }
 
-var nextSessionID uint64
+type sessionIDGetterType struct {
+	rand *mathrand.Rand
+	lockerMutex
+	prevTime uint64
+}
+
+func (sessionIDGetter *sessionIDGetterType) Get() (result SessionID) {
+	sessionIDGetter.LockDo(func() {
+		for {
+			result.CreatedAt = uint64(time.Now().UnixNano())
+			if result.CreatedAt != sessionIDGetter.prevTime {
+				break
+			}
+		}
+		if result.CreatedAt < sessionIDGetter.prevTime {
+			result.CreatedAt = sessionIDGetter.prevTime + 1 // could happen due to a time-resynchronization
+		}
+		sessionIDGetter.prevTime = result.CreatedAt
+	})
+
+	result.Random = sessionIDGetter.rand.Uint64()
+	return
+}
+
+var globalSessionIDGetter *sessionIDGetterType
+
+func init() {
+	var seedBytes [8]byte
+	_, err := rand.Read(seedBytes[:])
+	if err != nil {
+		panic(err)
+	}
+	useed := binary.BigEndian.Uint64(seedBytes[:])
+	seed := int64(useed & 0x7fffffffffffffff)
+	if useed >= 0x8000000000000000 {
+		seed = -seed - 1
+	}
+	globalSessionIDGetter = &sessionIDGetterType{
+		rand: mathrand.New(mathrand.NewSource(seed)),
+	}
+}
 
 func newSession(
 	ctx context.Context,
@@ -246,7 +306,7 @@ func newSession(
 	}
 
 	sess := &Session{
-		id:                   atomic.AddUint64(&nextSessionID, 1) - 1,
+		id:                   globalSessionIDGetter.Get(),
 		identity:             identity,
 		remoteIdentity:       remoteIdentity,
 		state:                newSessionStateStorage(),
@@ -254,8 +314,8 @@ func newSession(
 		eventHandler:         eventHandler,
 		waitForCipherKeyChan: make(chan struct{}),
 		sendDelayedNowChan:   make(chan *SendInfo),
-		cipherKey:            &[][]byte{nil}[0],
-		previousCipherKey:    &[][]byte{nil}[0],
+		cipherKeys:           &[][][]byte{nil}[0],
+		nextPacketID:         uint64(time.Now().UnixNano()),
 	}
 
 	sess.ctx, sess.cancelFunc = context.WithCancel(ctx)
@@ -330,7 +390,7 @@ func (sess *Session) GetMaxPacketSize() uint32 {
 }
 
 // ID returns the unique (though the program execution) session ID
-func (sess *Session) ID() uint64 {
+func (sess *Session) ID() SessionID {
 	return sess.id
 }
 
@@ -415,7 +475,8 @@ func (sess *Session) isDoneSlow() bool {
 }
 
 // SetPause with value `true` temporary disables the reading process
-// from the backend Reader.
+// from the backend Reader. To use this method the backend Reader
+// should has method SetReadDeadline or/and SetDeadline.
 //
 // SetPause(true) could be used only from state SessionStateEstablished.
 //
@@ -451,7 +512,7 @@ func (sess *Session) SetPause(newValue bool) (err error) {
 
 	switch {
 	case !result:
-		err = newErrCannotPauseFromThisState()
+		err = newErrCannotPauseOrUnpauseFromThisState()
 	case result && newValue:
 		err = sess.interruptRead()
 	}
@@ -470,13 +531,13 @@ func (sess *Session) waitForUnpause() {
 	sess.debugf("the blocking of readerLoop() by a pause has finished, continuing...")
 }
 
-// IsReading returns true if the session is being waiting for Read from
+// isReadingValue returns true if the session is being waiting for Read from
 // the backend to be returned (the reading from the backend is currently busy
 // by this Session)
 //
 // See also `(*Session).SetPause`.
-func (sess *Session) IsReading() bool {
-	return atomic.LoadUint64(&sess.isReading) != 0
+func (sess *Session) isReading() bool {
+	return atomic.LoadUint64(&sess.isReadingValue) != 0
 }
 func (sess *Session) setIsReading(v bool) {
 	var newValue uint64
@@ -485,7 +546,7 @@ func (sess *Session) setIsReading(v bool) {
 	} else {
 		newValue = 0
 	}
-	atomic.StoreUint64(&sess.isReading, newValue)
+	atomic.StoreUint64(&sess.isReadingValue, newValue)
 }
 
 func (sess *Session) readerLoop() {
@@ -544,11 +605,13 @@ func (sess *Session) readerLoop() {
 				continue
 			}
 
-			if !sess.eventHandler.Error(sess,
+			if sess.eventHandler.Error(sess,
 				xerrors.Errorf("unable to read from the backend (state == %v): %w",
 					sess.state.Load(), err,
 				),
 			) {
+				sess.debugf("a handled error, continuing")
+			} else {
 				sess.debugf("an unhandled error, closing the session")
 				_ = sess.Close()
 			}
@@ -754,10 +817,7 @@ func (sess *Session) decrypt(
 
 	{
 		var done bool
-		for _, cipherKey := range [][]byte{
-			sess.GetCipherKey(),
-			sess.GetPreviousCipherKey(),
-		} {
+		for _, cipherKey := range sess.GetCipherKeys() {
 			if done, err = tryDecrypt(cipherKey); done || err != nil {
 				return
 			}
@@ -897,48 +957,35 @@ func (sess *Session) WriteMessage(
 	return 0, err
 }
 
-// GetCipherKey returns the current cipher key.
+// GetCipherKeys returns the currently active cipher keys.
 // Do not modify it, it's not a copy.
 //
 // It returns nil if there was no successful key exchange, yet.
-func (sess *Session) GetCipherKey() []byte {
-	return *(*[]byte)(
+func (sess *Session) GetCipherKeys() [][]byte {
+	return *(*[][]byte)(
 		atomic.LoadPointer(
 			(*unsafe.Pointer)((unsafe.Pointer)(
-				&sess.cipherKey,
+				&sess.cipherKeys,
 			)),
 		),
 	)
 }
 
-// GetCipherKeyWait waits until the first successful key exchange and
+// GetCipherKeysWait waits until the first successful key exchange and
 // returns the latest cipher key.
 // Do not modify it, it's not a copy.
-func (sess *Session) GetCipherKeyWait() []byte {
-	cipherKey := sess.GetCipherKey()
-	if cipherKey != nil {
-		return cipherKey
+func (sess *Session) GetCipherKeysWait() [][]byte {
+	cipherKeys := sess.GetCipherKeys()
+	if len(cipherKeys) == secretIDs && cipherKeys[secretIDRecentBoth] != nil {
+		return cipherKeys
 	}
 
 	<-sess.waitForCipherKeyChan
-	cipherKey = sess.GetCipherKey()
-	if cipherKey == nil {
+	cipherKeys = sess.GetCipherKeys()
+	if cipherKeys == nil {
 		panic(`should not happened`)
 	}
-	return cipherKey
-}
-
-// GetPreviousCipherKey returns the previous cipher key.
-// Do not modify it, it's not a copy.
-// It returns nil, if there were less than 2 successful key exchanges.
-func (sess *Session) GetPreviousCipherKey() []byte {
-	return *(*[]byte)(
-		atomic.LoadPointer(
-			(*unsafe.Pointer)((unsafe.Pointer)(
-				&sess.previousCipherKey,
-			)),
-		),
-	)
+	return cipherKeys
 }
 
 // WriteMessageAsync asynchronously writes a message of MessageType `msgType`.
@@ -965,7 +1012,7 @@ func (sess *Session) WriteMessageAsync(
 	if msgType == messageTypeKeyExchange || sess.options.SendDelay == nil {
 		var cipherKey []byte
 		if msgType != messageTypeKeyExchange {
-			cipherKey = sess.GetCipherKeyWait()
+			cipherKey = sess.GetCipherKeysWait()[secretIDRecentBoth]
 		}
 		n, err := sess.writeMessageSync(cipherKey, hdr, payload)
 		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
@@ -1029,7 +1076,7 @@ func (sess *Session) writeMessageAsync(
 
 	if sess.options.SendDelay == nil {
 		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
-		sendInfo.N, sendInfo.Err = sess.writeMessageSync(sess.GetCipherKeyWait(), hdr, payload)
+		sendInfo.N, sendInfo.Err = sess.writeMessageSync(sess.GetCipherKeysWait()[secretIDRecentBoth], hdr, payload)
 		close(sendInfo.c)
 		return
 	}
@@ -1253,7 +1300,7 @@ func (sess *Session) sendDelayedNow(
 func (sess *Session) sendDelayedNowSyncFromBuffer(buf *buffer) (int, error) {
 	messagesBytes := buf.Bytes
 
-	cipherKey := sess.GetCipherKeyWait()
+	cipherKey := sess.GetCipherKeysWait()[secretIDRecentBoth]
 
 	containerHdr := sess.messagesContainerHeadersPool.AcquireMessagesContainerHeaders(sess)
 	err := containerHdr.Set(cipherKey, messagesBytes)
@@ -1465,16 +1512,16 @@ func (sess *Session) startKeyExchange() {
 		sess.identity,
 		sess.remoteIdentity,
 		sess.NewMessenger(messageTypeKeyExchange),
-		func(secret []byte) {
+		func(secrets [][]byte) {
 			// set secret function
 
-			if !sess.setSecret(secret) {
+			if !sess.setSecrets(secrets) {
 				// The same key as it was. Nothing to do.
-				sess.debugf("got key: the same as it was: %v", secret)
+				sess.debugf("got keys: the same as they were: %v", secrets)
 				return
 			}
 
-			sess.debugf("got key: new key: %v", secret)
+			sess.debugf("got keys: new keys: %v", secrets)
 		},
 		func() {
 			// "done" function
@@ -1516,28 +1563,42 @@ func (sess *Session) setMessenger(msgType MessageType, messenger *Messenger) {
 	})
 }
 
-func (sess *Session) setSecret(newSecret []byte) (result bool) {
+func (sess *Session) setSecrets(newSecrets [][]byte) (result bool) {
 	sess.LockDo(func() {
-		sess.currentSecret = newSecret
-		newCipherKey := newSecret[:chacha.KeySize]
-		previousCipherKey := atomic.SwapPointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.cipherKey)), (unsafe.Pointer)(&newCipherKey))
-		if bytes.Compare(newCipherKey, *(*[]byte)(previousCipherKey)) == 0 {
+		sess.currentSecrets = newSecrets
+		oldCipherKeys := sess.GetCipherKeys()
+		newCipherKeys := make([][]byte, 0, len(newSecrets))
+		changedCount := 0
+		for idx, newSecret := range newSecrets {
+			var newCipherKey []byte
+			if newSecret != nil {
+				newCipherKey = newSecret[:chacha.KeySize]
+			}
+			newCipherKeys = append(newCipherKeys, newCipherKey)
+			if idx < len(oldCipherKeys) && bytes.Compare(newCipherKey, oldCipherKeys[idx]) == 0 {
+				continue
+			}
+			changedCount++
+		}
+		if changedCount == 0 {
 			return
 		}
 
-		atomic.SwapPointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.previousCipherKey)), previousCipherKey)
+		atomic.StorePointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.cipherKeys)), (unsafe.Pointer)(&newCipherKeys))
 
-		// check if sess.waitForCipherKeyChan is already closed
-		select {
-		case _, ok := <-sess.waitForCipherKeyChan:
-			if !ok {
-				return
+		if len(newCipherKeys) == secretIDs {
+			// check if sess.waitForCipherKeyChan is already closed
+			select {
+			case _, ok := <-sess.waitForCipherKeyChan:
+				if !ok {
+					return
+				}
+			default:
 			}
-		default:
-		}
 
-		// it not closed, yet? OK, close it:
-		close(sess.waitForCipherKeyChan)
+			// it not closed, yet? OK, close it:
+			close(sess.waitForCipherKeyChan)
+		}
 		result = true
 	})
 
@@ -1605,7 +1666,7 @@ func (sess *Session) interruptRead() (err error) {
 			err = wrapError(err)
 		}
 	}()
-	if !sess.IsReading() {
+	if !sess.isReading() {
 		return nil
 	}
 	sess.debugf("interrupting the Read()")
@@ -1642,7 +1703,9 @@ func (sess *Session) WaitForClosure() {
 	sess.stopWaitGroup.Wait()
 }
 
-// GetEphemeralKey just returns the last generated shared key
-func (sess *Session) GetEphemeralKey() []byte {
-	return sess.currentSecret
+// GetEphemeralKeys just returns the last generated shared keys
+//
+// It's not a copy, don't modify.
+func (sess *Session) GetEphemeralKeys() [][]byte {
+	return sess.currentSecrets
 }
