@@ -456,7 +456,7 @@ func (kx *keyExchanger) loop() {
 	}
 }
 
-func (kx *keyExchanger) updateKey() (result uint64) {
+func (kx *keyExchanger) updateLocalKey() (result uint64) {
 	var isAlreadyInProgress bool
 	kx.keyLocker.RLockDo(func() {
 		isAlreadyInProgress = kx.nextLocalKeyCreatedAt > kx.localKeyCreatedAt
@@ -482,6 +482,12 @@ func (kx *keyExchanger) updateKey() (result uint64) {
 		}
 		result = kx.nextLocalKeyCreatedAt
 	})
+
+	err = kx.updateSecrets()
+	if err != nil {
+		kx.errFunc(wrapError(err))
+		return
+	}
 
 	return
 }
@@ -509,7 +515,10 @@ func (kx *keyExchanger) KeyUpdateSendWait() {
 			kx.messenger.sess.debugf("[kx] somebody already updated the key, skipping key-update iteration.")
 			return
 		}
-		nextKeyCreatedAt := kx.updateKey()
+		var nextKeyCreatedAt uint64
+		kx.LockDo(func() {
+			nextKeyCreatedAt = kx.updateLocalKey()
+		})
 		kx.messenger.sess.debugf("[kx] nextKeyCreatedAt == %v", nextKeyCreatedAt)
 		if nextKeyCreatedAt == 0 {
 			return
@@ -584,7 +593,7 @@ func (kx *keyExchanger) mustSendPublicKey(isAnswer bool) {
 
 func (kx *keyExchanger) sendPublicKey(isAnswer bool) error {
 	if kx.nextLocalPublicKey == nil && isAnswer {
-		kx.updateKey()
+		kx.updateLocalKey()
 		kx.skipKeyUpdateUntil = time.Now().Add(kx.options.KeyUpdateInterval)
 	}
 	kx.messenger.sess.debugf("[kx] kx.sendPublicKey(isAnswer: %v)", isAnswer)
