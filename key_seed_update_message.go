@@ -10,7 +10,7 @@ var (
 )
 
 type keySeedUpdateMessageContainer struct {
-	KeyID uint64
+	//KeyID uint64
 	keySeedUpdateMessageSigned
 }
 

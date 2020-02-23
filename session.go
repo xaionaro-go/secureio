@@ -120,8 +120,10 @@ type Session struct {
 
 	nextPacketID uint64
 
-	pauseLocker    sync.Mutex
-	isReadingValue uint64
+	pauseWaitLocker sync.Mutex
+	pauseLocker     lockerMutex
+	isReadingValue  uint64
+	pauseStartChan  chan struct{}
 
 	readDeadlineLocker      lockerMutex
 	readInterruptsRequested uint64
@@ -501,26 +503,34 @@ func (sess *Session) SetPause(newValue bool) (err error) {
 	}
 
 	result := false
-	sess.LockDo(func() {
-		if newValue {
-			if sess.setState(SessionStatePaused, badStates...) == SessionStateEstablished {
-				sess.pauseLocker.Lock()
-				result = true
+	sess.pauseLocker.LockDo(func() {
+		sess.LockDo(func() {
+			if newValue {
+				sess.pauseStartChan = make(chan struct{})
+				if sess.setState(SessionStatePaused, badStates...) == SessionStateEstablished {
+					sess.pauseWaitLocker.Lock()
+					result = true
+				} else {
+					sess.pauseStartChan = nil
+				}
+			} else {
+				if sess.setState(SessionStateEstablished, badStates...) == SessionStatePaused {
+					sess.pauseWaitLocker.Unlock()
+					result = true
+				}
 			}
-		} else {
-			if sess.setState(SessionStateEstablished, badStates...) == SessionStatePaused {
-				sess.pauseLocker.Unlock()
-				result = true
-			}
+
+		})
+
+		switch {
+		case !result:
+			err = newErrCannotPauseOrUnpauseFromThisState()
+		case result && newValue:
+			err = sess.interruptRead()
+			<-sess.pauseStartChan
+			sess.pauseStartChan = nil
 		}
 	})
-
-	switch {
-	case !result:
-		err = newErrCannotPauseOrUnpauseFromThisState()
-	case result && newValue:
-		err = sess.interruptRead()
-	}
 
 	return
 }
@@ -532,8 +542,9 @@ func (sess *Session) waitForUnpause() {
 
 	sess.debugf("blocked readerLoop() by a pause, waiting...")
 	_ = sess.resetReadDeadline()
-	sess.pauseLocker.Lock()
-	sess.pauseLocker.Unlock()
+	close(sess.pauseStartChan)
+	sess.pauseWaitLocker.Lock()
+	sess.pauseWaitLocker.Unlock()
 	sess.debugf("the blocking of readerLoop() by a pause has finished, continuing...")
 }
 

@@ -197,7 +197,7 @@ func newKeyExchanger(
 		remoteIdentity:    remoteIdentity,
 		messenger:         messenger,
 		ecdh:              ecdh.X25519(),
-		successNotifyChan: make(chan uint64),
+		successNotifyChan: make(chan uint64, 1),
 	}
 
 	if opts != nil {
@@ -396,17 +396,27 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 }
 
 func (kx *keyExchanger) sendSuccessNotifications() {
+	kx.messenger.sess.debugf("[kx] sendSuccessNotifications()")
 	var localNextKeyID uint64
 	kx.keyLocker.RLockDo(func() {
 		localNextKeyID = kx.nextLocalKeyCreatedAt
 		kx.localKeyCreatedAt = localNextKeyID
 	})
 	func() {
-		defer func() { recover() }() // just in case; TODO: remove this line
+		defer func() {
+			// just in case; TODO: remove this `defer`
+			err := recover()
+			if err != nil {
+				kx.errFunc(fmt.Errorf("panic: %s", err))
+			}
+		}()
 		select {
 		case <-kx.ctx.Done():
+			kx.messenger.sess.debugf("[kx] cancelled: kx.successNotifyChan <- localNextKeyID<%v>", localNextKeyID)
 		case kx.successNotifyChan <- localNextKeyID:
+			kx.messenger.sess.debugf("[kx] sent kx.successNotifyChan <- localNextKeyID<%v>", localNextKeyID)
 		default:
+			kx.messenger.sess.debugf("[kx] cannot send: kx.successNotifyChan <- localNextKeyID<%v>", localNextKeyID)
 		}
 	}()
 	kx.messenger.sess.debugf("[kx] a successful key exchange, localKeyCreatedAt == %v", localNextKeyID)
@@ -415,8 +425,8 @@ func (kx *keyExchanger) sendSuccessNotifications() {
 }
 
 func (kx *keyExchanger) Close() error {
+	kx.messenger.sess.debugf("[kx] key exchanger Close()")
 	kx.stop()
-	kx.messenger.sess.debugf("[kx] key exchanger closed")
 	return nil
 }
 
@@ -509,6 +519,25 @@ func (kx *keyExchanger) KeyUpdateSendWait() {
 		kx.mustSendPublicKey(false)
 
 		// Retries:
+		checkNewKeyCreatedAt := func(newKeyCreatedAt uint64) bool {
+			if newKeyCreatedAt > nextKeyCreatedAt {
+				panic(`newKeyCreatedAt > nextKeyCreatedAt`)
+			}
+			kx.messenger.sess.debugf("[kx] checkNewKeyCreatedAt: %v ?= %v", newKeyCreatedAt, nextKeyCreatedAt)
+			return newKeyCreatedAt == nextKeyCreatedAt
+		}
+		checkSuccessNotifyChan := func() bool {
+			select {
+			case newKeyCreatedAt, ok := <-kx.successNotifyChan:
+				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: late-success (keyCreatedAt == %v)", newKeyCreatedAt)
+				if !ok {
+					return true
+				}
+				return checkNewKeyCreatedAt(newKeyCreatedAt)
+			default:
+				return false
+			}
+		}
 		timeoutTimer := time.NewTimer(kx.options.Timeout)
 		retryTicker := time.NewTicker(kx.options.RetryInterval)
 		defer retryTicker.Stop()
@@ -522,18 +551,21 @@ func (kx *keyExchanger) KeyUpdateSendWait() {
 				if !ok {
 					return
 				}
-				if newKeyCreatedAt > nextKeyCreatedAt {
-					panic(`newKeyCreatedAt > nextKeyCreatedAt`)
-				}
-				if newKeyCreatedAt == nextKeyCreatedAt {
+				if checkNewKeyCreatedAt(newKeyCreatedAt) {
 					return
 				}
 			case <-retryTicker.C:
 				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: retry (waiting for keyCreatedAt == %v)", nextKeyCreatedAt)
+				if checkSuccessNotifyChan() { // just in case; TODO: check if it is really useful
+					return
+				}
 				runtime.Gosched()
 				kx.mustSendPublicKey(false)
 			case <-timeoutTimer.C:
 				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: timeout")
+				if checkSuccessNotifyChan() { // just in case; TODO: check if it is really useful
+					return
+				}
 				_ = kx.Close()
 				kx.errFunc(newErrKeyExchangeTimeout())
 				return

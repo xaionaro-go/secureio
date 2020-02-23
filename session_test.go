@@ -370,35 +370,41 @@ func TestHackerDuplicateMessage(t *testing.T) {
 	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
 	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{t, nil}, opts)
 
-	writeBuf := make([]byte, sess0.GetMaxPayloadSize())
-	rand.Read(writeBuf)
-	readBuf := make([]byte, sess0.GetMaxPayloadSize())
-
 	// Now a hacker appears, listens a message in the middle a repeats it.
 	// A secureio client should ignore the duplicate
 
 	// Intercepting a message
 
 	// wait for successful key-exchange
-	sess0.WaitForState(ctx, SessionStateEstablished)
-	sess1.WaitForState(ctx, SessionStateEstablished)
+	assert.Equal(t, SessionStateEstablished, sess0.WaitForState(ctx, SessionStateEstablished))
+	assert.Equal(t, SessionStateEstablished, sess1.WaitForState(ctx, SessionStateEstablished))
 
 	// sess1.SetPause(true) will temporary pause sess1.
 	// So we will be able to read from `conn1` to intercept a message.
 	assert.NoError(t, sess1.SetPause(true))
 
-	rand.Read(writeBuf)
+	msgSize := sess0.GetMaxPayloadSize()
 
 	// Now sess1 is paused (does not listen for traffic
 	// and now we can intercept it), so sending a message:
+	writeBuf := make([]byte, msgSize)
+	rand.Read(writeBuf)
 	_, err := sess0.Write(writeBuf)
 	assert.NoError(t, err)
 
 	// And intercepting it:
 	interceptedMessage := make([]byte, sess1.GetMaxPacketSize()+1)
-	n, err := conn1.Read(interceptedMessage)
-	assert.Less(t, n, int(sess1.GetMaxPacketSize())+1)
-	assert.NoError(t, err)
+	for {
+		n, err := conn1.Read(interceptedMessage)
+		if !assert.Less(t, n, int(sess1.GetMaxPacketSize())+1) {
+			return
+		}
+		assert.NoError(t, err)
+		if n >= int(msgSize) { // waiting for our message
+			interceptedMessage = interceptedMessage[:n]
+			break
+		}
+	}
 
 	// Unpausing and resending the message to pretend like we
 	// weren't here:
@@ -406,8 +412,12 @@ func TestHackerDuplicateMessage(t *testing.T) {
 	_, err = conn0.Write(interceptedMessage)
 	assert.NoError(t, err)
 
-	_, err = sess1.Read(readBuf)
+	readBuf := make([]byte, msgSize+1)
+	n, err := sess1.Read(readBuf)
 	assert.NoError(t, err)
+	if assert.Equal(t, int(msgSize), n) {
+		readBuf = readBuf[:n]
+	}
 
 	assert.Equal(t, writeBuf, readBuf)
 

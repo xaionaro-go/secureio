@@ -4,4 +4,4 @@ go:
   - master
 before_install:
   - go get github.com/mattn/goveralls
-script: go test -v ./... -count=1 && go vet -v ./... && golint ./... && $GOPATH/bin/goveralls -service=travis-ci
+script: go test -v ./... -count=5 && go vet -v ./... && golint ./... && $GOPATH/bin/goveralls -service=travis-ci

@@ -156,6 +156,7 @@ is just ignored.
 
 # TODO
 
+* add an unit-test for key renew
 * implement `(*sendInfo).SendNow()`
 * implement smart lockers
 * check keyCreatedAt
