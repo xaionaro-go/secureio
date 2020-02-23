@@ -547,6 +547,9 @@ func (kx *keyExchanger) mustSendPublicKey(isAnswer bool) {
 }
 
 func (kx *keyExchanger) sendPublicKey(isAnswer bool) error {
+	if kx.nextLocalPublicKey == nil && isAnswer {
+		kx.updateKey()
+	}
 	kx.messenger.sess.debugf("[kx] kx.sendPublicKey(isAnswer: %v)", isAnswer)
 	msg := &keySeedUpdateMessage{}
 	msg.SessionID = kx.messenger.sess.id
