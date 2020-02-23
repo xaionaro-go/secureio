@@ -155,7 +155,6 @@ is just ignored.
 
 # TODO
 
-* add coverage badge
 * implement `(*sendInfo).SendNow()`
 * implement smart lockers
 * check keyCreatedAt

@@ -98,6 +98,7 @@ type keyExchanger struct {
 	nextLocalKeyCreatedAt uint64
 	successNotifyChan     chan uint64
 	keyUpdateLocker       lockerRWMutex
+	skipKeyUpdateUntil    time.Time
 }
 
 // KeyExchangerOptions is used to configure the key exchanging options.
@@ -495,6 +496,10 @@ func (kx *keyExchanger) KeyUpdateSendWait() {
 		}
 
 		// Update the key (and increase nextKeyCreatedAt)
+		if time.Now().Before(kx.skipKeyUpdateUntil) {
+			kx.messenger.sess.debugf("[kx] somebody already updated the key, skipping key-update iteration.")
+			return
+		}
 		nextKeyCreatedAt := kx.updateKey()
 		kx.messenger.sess.debugf("[kx] nextKeyCreatedAt == %v", nextKeyCreatedAt)
 		if nextKeyCreatedAt == 0 {
@@ -549,6 +554,7 @@ func (kx *keyExchanger) mustSendPublicKey(isAnswer bool) {
 func (kx *keyExchanger) sendPublicKey(isAnswer bool) error {
 	if kx.nextLocalPublicKey == nil && isAnswer {
 		kx.updateKey()
+		kx.skipKeyUpdateUntil = time.Now().Add(kx.options.KeyUpdateInterval)
 	}
 	kx.messenger.sess.debugf("[kx] kx.sendPublicKey(isAnswer: %v)", isAnswer)
 	msg := &keySeedUpdateMessage{}
