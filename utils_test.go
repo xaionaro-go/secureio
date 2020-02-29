@@ -111,7 +111,7 @@ func printLogsOfSession(t *testing.T, enableInfo bool, sess *Session) {
 var testPipeCounter uint64
 
 //go:norace
-func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 io.ReadWriteCloser) {
+func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 *net.UnixConn) {
 	var err error
 
 	if t == nil {
@@ -138,61 +138,38 @@ func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 io.Rea
 		t.Fatal(err)
 	}
 
-	if testUseUnixSocket {
-		testPairMutex.Lock()
-		defer testPairMutex.Unlock()
+	testPairMutex.Lock()
+	defer testPairMutex.Unlock()
 
-		sockPath := fmt.Sprintf(`/tmp/xaionaro-go-secureio-%d-%d-0.sock`, os.Getpid(), atomic.AddUint64(&testPipeCounter, 1))
-		_ = os.Remove(sockPath)
+	sockPath := fmt.Sprintf(`/tmp/xaionaro-go-secureio-%d-%d-0.sock`, os.Getpid(), atomic.AddUint64(&testPipeCounter, 1))
+	_ = os.Remove(sockPath)
 
-		l0, err := net.Listen(`unixpacket`, sockPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		var wg sync.WaitGroup
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			conn1, err = net.Dial(`unixpacket`, sockPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-		}()
-
-		conn0, err = l0.Accept()
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		wg.Wait()
-
-	} else {
-
-		pipeR0, pipeW0, err := os.Pipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		pipeR1, pipeW1, err := os.Pipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		conn0 = &pipeReadWriter{
-			Prefix:      "0",
-			ReadCloser:  pipeR0,
-			WriteCloser: pipeW1,
-		}
-
-		conn1 = &pipeReadWriter{
-			Prefix:      "1",
-			ReadCloser:  pipeR1,
-			WriteCloser: pipeW0,
-		}
-
+	l0, err := net.Listen(`unixpacket`, sockPath)
+	if err != nil {
+		t.Fatal(err)
 	}
+
+	var wg sync.WaitGroup
+
+	var conn0i, conn1i net.Conn
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		conn1i, err = net.Dial(`unixpacket`, sockPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	conn0i, err = l0.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wg.Wait()
+
+	conn0 = conn0i.(*net.UnixConn)
+	conn1 = conn1i.(*net.UnixConn)
 
 	return
 }

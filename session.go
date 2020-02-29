@@ -59,6 +59,13 @@ func (sessID *SessionID) Bytes() (result [16]byte) {
 	return
 }
 
+// FillFromBytes fills SessionID using bytes slice.
+// A bytes slice could be received via method Bytes()
+func (sessID *SessionID) FillFromBytes(b []byte) {
+	sessID.CreatedAt = binaryOrderType.Uint64(b[0:])
+	sessID.Random = binaryOrderType.Uint64(b[8:])
+}
+
 // Session is an encrypted communication session which:
 // * Verifies the remote side.
 // * Uses ephemeral encryption keys ("cipher key") to encrypt/decrypt the traffic.
@@ -128,6 +135,8 @@ type Session struct {
 	readDeadlineLocker      lockerMutex
 	readInterruptsRequested uint64
 	readInterruptsHappened  uint64
+
+	remoteSessionID *SessionID
 }
 
 // DebugOutputEntry is a structure of data which is being passed to a debugger
@@ -503,6 +512,7 @@ func (sess *Session) SetPause(newValue bool) (err error) {
 	}
 
 	result := false
+	var waitChan chan struct{}
 	sess.pauseLocker.LockDo(func() {
 		sess.LockDo(func() {
 			if newValue {
@@ -526,11 +536,14 @@ func (sess *Session) SetPause(newValue bool) (err error) {
 		case !result:
 			err = newErrCannotPauseOrUnpauseFromThisState()
 		case result && newValue:
+			waitChan = sess.pauseStartChan
 			err = sess.interruptRead()
-			<-sess.pauseStartChan
-			sess.pauseStartChan = nil
 		}
 	})
+
+	if waitChan != nil {
+		<-waitChan
+	}
 
 	return
 }
@@ -541,8 +554,14 @@ func (sess *Session) waitForUnpause() {
 	}
 
 	sess.debugf("blocked readerLoop() by a pause, waiting...")
+	sess.pauseLocker.LockDo(func() {
+		if sess.pauseStartChan == nil {
+			return
+		}
+		close(sess.pauseStartChan)
+		sess.pauseStartChan = nil
+	})
 	_ = sess.resetReadDeadline()
-	close(sess.pauseStartChan)
 	sess.pauseWaitLocker.Lock()
 	sess.pauseWaitLocker.Unlock()
 	sess.debugf("the blocking of readerLoop() by a pause has finished, continuing...")
@@ -802,19 +821,28 @@ func (sess *Session) decrypt(
 	}
 
 	// decrypting the rest:
-	encrypted = encrypted[ivSize:]
+	encrypted = encrypted[len(containerHdr.PacketID):]
+
+	ivBuf := sess.bufferPool.AcquireBuffer()
+	defer ivBuf.Release()
+	if sess.remoteSessionID != nil {
+		sessionIDBytes := sess.remoteSessionID.Bytes()
+		ivBuf.Grow(uint(len(sessionIDBytes) + len(containerHdr.PacketID)))
+		copy(ivBuf.Bytes, sessionIDBytes[:])
+		copy(ivBuf.Bytes[len(sessionIDBytes):], containerHdr.PacketID[:])
+	}
 
 	tryDecrypt := func(cipherKey []byte) (bool, error) {
 		decrypted.Reset()
 		decrypted.Grow(uint(len(encrypted)))
 
 		if cipherKey != nil {
-			decrypt(cipherKey, containerHdr.PacketID[:], decrypted.Bytes, encrypted)
+			decrypt(cipherKey, ivBuf.Bytes, decrypted.Bytes, encrypted)
 
 			if len(encrypted) < 200 {
 				sess.ifDebug(func() {
 					sess.debugf("decrypted: iv:%v dec:%v enc:%v dec_len:%v cipher_key:%v",
-						([ivSize]byte)(containerHdr.PacketID), decrypted.Bytes, encrypted, decrypted.Len(), cipherKey)
+						([8]byte)(containerHdr.PacketID), decrypted.Bytes, encrypted, decrypted.Len(), cipherKey)
 				})
 			}
 		} else {
@@ -1486,15 +1514,23 @@ func (sess *Session) sendMessages(
 
 		plainBytes := buf.Bytes[:size]
 
+		ivBuf := sess.bufferPool.AcquireBuffer()
+		defer ivBuf.Release()
+
+		sessionIDBytes := sess.id.Bytes()
+		ivBuf.Grow(uint(len(sessionIDBytes) + len(containerHdr.PacketID)))
+		copy(ivBuf.Bytes, sessionIDBytes[:])
+		copy(ivBuf.Bytes[len(sessionIDBytes):], containerHdr.PacketID[:])
+
 		encryptedBytes := encrypted.Bytes[:size]
-		encrypt(cipherKey, containerHdr.PacketID[:], encryptedBytes[ivSize:], plainBytes[ivSize:])
-		copy(encryptedBytes[:ivSize], containerHdr.PacketID[:]) // copying the plain IV
+		encrypt(cipherKey, ivBuf.Bytes, encryptedBytes[len(containerHdr.PacketID):], plainBytes[len(containerHdr.PacketID):])
+		copy(encryptedBytes[:len(containerHdr.PacketID)], containerHdr.PacketID[:]) // copying the plain IV
 		sess.ifDebug(func() {
 			if len(encryptedBytes) >= 200 {
 				return
 			}
 			sess.debugf("iv == %v; encrypted == %v; plain == %v, cipherKey == %+v",
-				containerHdr.PacketID[:], encryptedBytes[ivSize:], plainBytes[ivSize:], cipherKey)
+				containerHdr.PacketID[:], encryptedBytes[len(containerHdr.PacketID):], plainBytes[len(containerHdr.PacketID):], cipherKey)
 		})
 		outBytes = encryptedBytes
 	}
@@ -1778,4 +1814,9 @@ func (sess *Session) WaitForClosure() {
 // It's not a copy, don't modify.
 func (sess *Session) GetEphemeralKeys() [][]byte {
 	return sess.currentSecrets
+}
+
+func (sess *Session) setRemoteSessionID(remoteSessionID *SessionID) {
+	sess.debugf("setRemoteSessionID(%v)", remoteSessionID)
+	sess.remoteSessionID = remoteSessionID
 }

@@ -394,12 +394,18 @@ func TestHackerDuplicateMessage(t *testing.T) {
 
 	// And intercepting it:
 	interceptedMessage := make([]byte, sess1.GetMaxPacketSize()+1)
+	conn1.SetReadDeadline(time.Now().Add(time.Hour * 24 * 365))
 	for {
 		n, err := conn1.Read(interceptedMessage)
 		if !assert.Less(t, n, int(sess1.GetMaxPacketSize())+1) {
 			return
 		}
-		assert.NoError(t, err)
+		if !assert.NoError(t, err) {
+			return
+		}
+		if !assert.NotZero(t, n) {
+			return
+		}
 		if n >= int(msgSize) { // waiting for our message
 			interceptedMessage = interceptedMessage[:n]
 			break
@@ -421,6 +427,8 @@ func TestHackerDuplicateMessage(t *testing.T) {
 
 	assert.Equal(t, writeBuf, readBuf)
 
+	successfullyIgnoredTheDuplicate := false
+	assert.Equal(t, uint64(0), sess1.GetUnexpectedPacketIDCount())
 	// And now repeating the message (making a duplicate).
 	// This message should be ignored by "sess1" (if everything
 	// works correctly and option AllowReorderingAndDuplication
@@ -445,8 +453,6 @@ func TestHackerDuplicateMessage(t *testing.T) {
 		}
 	}()
 
-	successfullyIgnoredTheDuplicate := false
-	assert.Equal(t, uint64(0), sess1.GetUnexpectedPacketIDCount())
 	go func() {
 		for sess1.GetUnexpectedPacketIDCount() == 0 {
 			runtime.Gosched()
@@ -485,4 +491,13 @@ func TestHackerDuplicateMessage(t *testing.T) {
 
 	assert.Equal(t, SessionStateClosed, sess0.GetState())
 	assert.Equal(t, SessionStateClosed, sess1.GetState())
+}
+
+func TestSessionID_Bytes(t *testing.T) {
+	var id, idCmp SessionID
+	id.CreatedAt = uint64(time.Now().UnixNano())
+	id.Random = rand.Uint64()
+	idBytes := id.Bytes()
+	idCmp.FillFromBytes(idBytes[:])
+	assert.Equal(t, id, idCmp)
 }

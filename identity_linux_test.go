@@ -31,33 +31,26 @@ func TestMissedKeySeedMessage(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		key, err := identity0.MutualConfirmationOfIdentity(ctx, identity1, conn0, &testLogger{t, nil}, opts)
-		if assert.Equal(t, 4, len(key)) {
-			assert.Equal(t, 32, len(key[0]))
-		}
+		keys, err := identity0.MutualConfirmationOfIdentity(ctx, identity1, conn0, &testLogger{t, nil}, opts)
 		assert.NoError(t, err)
+		if assert.Equal(t, 4, len(keys)) {
+			assert.Equal(t, 32, len(keys[0]))
+		}
 	}()
 
 	// Getting one packet missed
-	missedBytes := 0
-	for {
-		readBuf := make([]byte, 65536)
-		n, err := conn1.Read(readBuf)
-		assert.NoError(t, err)
-		missedBytes += n
-		if missedBytes >= 32+32+1 {
-			break
-		}
-	}
+	readBuf := make([]byte, 65536)
+	_, err := conn1.Read(readBuf)
+	assert.NoError(t, err)
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		key, err := identity1.MutualConfirmationOfIdentity(ctx, identity0, conn1, &testLogger{t, nil}, opts)
-		if assert.Equal(t, 4, len(key)) {
-			assert.Equal(t, 32, len(key[0]))
-		}
+		keys, err := identity1.MutualConfirmationOfIdentity(ctx, identity0, conn1, &testLogger{t, nil}, opts)
 		assert.NoError(t, err)
+		if assert.Equal(t, 4, len(keys)) {
+			assert.Equal(t, 32, len(keys[0]))
+		}
 	}()
 
 	wg.Wait()

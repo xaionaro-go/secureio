@@ -132,7 +132,7 @@ If PSK is not set then just a key received via ECDH is used
 The remote side is authenticated by a ED25519 signature (of the
 key exchange message).
 
-The resulting value is used as the encryption key for ChaCha20.
+The resulting value is used as the encryption key for XChaCha20.
 This key is called `cipherKey` within the code.
 
 The key received via ECDH is updated [every minute](https://github.com/xaionaro-go/secureio/blob/ccd4d864545620b5483c88df91491817e4f0a442/key_exchanger.go#L18).
@@ -140,9 +140,13 @@ So in turn the `cipherKey` is updated every minute as well.
 
 ### Encryption
 
+Also a `SessionID` is exchanged by the very first key-exchange messages.
+`SessionID` is a combination of UnixNano (of when the Session was initialized)
+and random 64-bit integer.
+
 Each packet starts with an unique (for a session) non-encrypted
-`PacketID`. The `PacketID` is used as IV/NONCE for ChaCha20 and
-`cipherKey` is used as the key.
+`PacketID`. The `PacketID` in combination with `SessionID`
+are used as IV/NONCE for XChaCha20 and `cipherKey` is used as the key.
 
 ### Message authentication 
 
@@ -156,6 +160,7 @@ is just ignored.
 
 # TODO
 
+* increase code-coverage to 90%
 * add an unit-test for key renew
 * implement `(*sendInfo).SendNow()`
 * implement smart lockers

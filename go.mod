@@ -5,6 +5,7 @@ go 1.13
 require (
 	github.com/aead/chacha20 v0.0.0-20180709150244-8b13a72661da
 	github.com/aead/ecdh v0.2.0
+	github.com/mattn/goveralls v0.0.5 // indirect
 	github.com/mohae/deepcopy v0.0.0-20170929034955-c48cc78d4826
 	github.com/stretchr/testify v1.4.0
 	github.com/valyala/fastrand v1.0.0 // indirect

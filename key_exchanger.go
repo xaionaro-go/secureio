@@ -241,7 +241,14 @@ func (kx *keyExchanger) LockDo(fn func()) {
 func (kx *keyExchanger) generateSharedKey(
 	localPrivateKey *[curve25519PrivateKeySize]byte,
 	remotePublicKey *[curve25519PublicKeySize]byte,
-) ([]byte, *xerrors.Error) {
+) (sharedKey []byte, err *xerrors.Error) {
+	defer func() {
+		if err != nil {
+			err.SetFormat(xerrors.FormatOneLine)
+		}
+		kx.messenger.sess.debugf("[kx] generatedSharedKey() -> %v, %v", sharedKey, err)
+	}()
+
 	if localPrivateKey == nil {
 		return nil, newErrLocalPrivateKeyIsNil()
 	}
@@ -307,15 +314,17 @@ func (kx *keyExchanger) updateSecrets() (err error) {
 			newSecret, genErr = kx.generateSharedKey(prevLocal, prevRemote)
 		}
 		if genErr != nil &&
-			genErr.Has(errLocalPrivateKeyIsNil{}) &&
-			genErr.Has(errRemotePublicKeyIsNil{}) {
+			!genErr.Has(errLocalPrivateKeyIsNil{}) &&
+			!genErr.Has(errRemotePublicKeyIsNil{}) {
 			return genErr
 		}
 		newSecrets[secretIdx] = newSecret
 	}
 
-	kx.messenger.sess.debugf("[kx] set the secrets")
-	kx.setSecretsFunc(newSecrets)
+	if len(newSecrets[secretIDRecentBoth]) != 0 {
+		kx.messenger.sess.debugf("[kx] set the secrets == %v", newSecrets)
+		kx.setSecretsFunc(newSecrets)
+	}
 	return nil
 }
 
@@ -359,6 +368,11 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 	kx.LockDo(func() {
 		defer func() { err = wrapError(err) }()
 
+		if kx.remoteSessionID == nil {
+			kx.remoteSessionID = &msg.SessionID
+			kx.messenger.sess.setRemoteSessionID(kx.remoteSessionID)
+		}
+
 		nextRemoteHasChanged := true
 		kx.keyLocker.LockDo(func() {
 			if kx.nextRemotePublicKey != nil &&
@@ -380,7 +394,6 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 		}
 
 		if msg.Flags.IsAnswer() || kx.options.AnswersMode != KeyExchangeAnswersModeAnswerAndWait {
-			kx.remoteSessionID = &msg.SessionID
 			kx.lastExchangeTS = time.Now()
 			kx.sendSuccessNotifications()
 		}
@@ -529,11 +542,8 @@ func (kx *keyExchanger) KeyUpdateSendWait() {
 
 		// Retries:
 		checkNewKeyCreatedAt := func(newKeyCreatedAt uint64) bool {
-			if newKeyCreatedAt > nextKeyCreatedAt {
-				panic(`newKeyCreatedAt > nextKeyCreatedAt`)
-			}
 			kx.messenger.sess.debugf("[kx] checkNewKeyCreatedAt: %v ?= %v", newKeyCreatedAt, nextKeyCreatedAt)
-			return newKeyCreatedAt == nextKeyCreatedAt
+			return newKeyCreatedAt >= nextKeyCreatedAt
 		}
 		checkSuccessNotifyChan := func() bool {
 			select {

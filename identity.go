@@ -1,12 +1,10 @@
 package secureio
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
-	"errors"
 	"io"
 	"io/ioutil"
 	"os"
@@ -266,9 +264,7 @@ func (i *Identity) MutualConfirmationOfIdentity(
 	backend io.ReadWriteCloser,
 	eventHandler EventHandler,
 	options *SessionOptions,
-) (ephemeralKeys [][]byte, xerr error) {
-	var n int
-
+) (ephemeralKeys [][]byte, returnError error) {
 	var opts SessionOptions
 	if options != nil {
 		opts = *options
@@ -278,15 +274,17 @@ func (i *Identity) MutualConfirmationOfIdentity(
 	opts.DetachOnSequentialDecryptFailsCount = 1
 	opts.DetachOnMessagesCount = 1
 
-	var decryptError error
 	sess := newSession(
 		ctx,
 		i,
 		remoteIdentity,
 		backend,
 		wrapErrorHandler(eventHandler, func(sess *Session, err error) bool {
-			if errors.As(err, &ErrCannotDecrypt{}) {
-				decryptError = err
+			if xerr, ok := err.(*xerrors.Error); ok {
+				switch {
+				case xerr.Has(ErrCannotDecrypt{}):
+					returnError = err
+				}
 			}
 			sess.debugf(`closing the backend due to %v`, err)
 			_ = sess.Close()
@@ -299,37 +297,22 @@ func (i *Identity) MutualConfirmationOfIdentity(
 		sess.WaitForClosure()
 	}()
 
-	n, err := sess.Write(i.Keys.Public)
+	_, err := sess.Write(nil)
 	if err != nil {
-		xerr = xerrors.Errorf(`unable to write via a session: %w`, err)
-		return
-	}
-	if n != len(i.Keys.Public) {
-		xerr = xerrors.Errorf(`unable to send my public key: %w`, newErrPartialWrite())
+		returnError = xerrors.Errorf(`unable to write to the session: %w`, err)
 		return
 	}
 
-	remotePubKey := make([]byte, len(remoteIdentity.Keys.Public))
-	n, err = sess.Read(remotePubKey)
+	_, err = sess.Read(nil)
 	if err != nil {
-		xerr = xerrors.Errorf(`unable to read data via session: %w`, err)
-		return
-	}
-	if decryptError != nil {
-		xerr = xerrors.Errorf(`unable to decrypt: %w`, decryptError)
-		return
-	}
-	if n != len(i.Keys.Public) {
-		xerr = newErrWrongKeyLength(uint(len(i.Keys.Public)), uint(n))
-		return
-	}
-
-	if bytes.Compare(remoteIdentity.Keys.Public, remotePubKey) != 0 {
-		xerr = newErrInvalidSignature()
+		returnError = xerrors.Errorf(`unable to read from the session: %w`, err)
 		return
 	}
 
 	ephemeralKeys = sess.GetEphemeralKeys()
+	if len(ephemeralKeys) != secretIDs {
+		returnError = newErrCanceled()
+	}
 	return
 }
 

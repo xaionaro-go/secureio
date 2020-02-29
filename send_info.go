@@ -101,12 +101,9 @@ func (sendInfo *SendInfo) incRefCount() int32 {
 func (sendInfo *SendInfo) Release() {
 	select {
 	case <-sendInfo.c:
+	case <-sendInfo.ctx.Done():
 	default:
-		select {
-		case <-sendInfo.ctx.Done():
-		default:
-			panic("Release() was called on a non-finished sendInfo")
-		}
+		panic("Release() was called on a non-finished sendInfo")
 	}
 	refCount := atomic.AddInt32(&sendInfo.refCount, -1)
 	if refCount != 0 {

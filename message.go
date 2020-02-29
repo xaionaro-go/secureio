@@ -8,11 +8,12 @@ import (
 	"sync"
 	"sync/atomic"
 
-	xerrors "github.com/xaionaro-go/errors"
 	"github.com/xaionaro-go/slice"
 	"github.com/xaionaro-go/unsafetools"
 	"golang.org/x/crypto/poly1305"
 	"lukechampine.com/blake3"
+
+	xerrors "github.com/xaionaro-go/errors"
 )
 
 const (
@@ -20,7 +21,7 @@ const (
 )
 
 const (
-	ivSize = 8
+	ivSize = 24 // XChaCha20
 )
 
 var (
@@ -160,7 +161,7 @@ func (flags *messagesContainerFlags) SetIsEncrypted(newValue bool) {
 	}
 }
 
-type packetID [ivSize]byte
+type packetID [8]byte
 
 func (id *packetID) Value() uint64 {
 	return binaryOrderType.Uint64(id[:])
@@ -172,18 +173,18 @@ func (id *packetID) SetNextPacketID(sess *Session) {
 	binaryOrderType.PutUint64((*id)[:], atomic.AddUint64(&sess.nextPacketID, 1))
 }
 func (id *packetID) Read(b []byte) (int, error) {
-	if len(b) < ivSize {
-		return 0, newErrTooShort(ivSize, uint(len(b)))
+	if len(b) < len(*id) {
+		return 0, newErrTooShort(uint(len(*id)), uint(len(b)))
 	}
 	copy((*id)[:], b)
-	return ivSize, nil
+	return len(*id), nil
 }
 func (id *packetID) Write(b []byte) (int, error) {
-	if len(b) < ivSize {
-		return 0, newErrTooShort(ivSize, uint(len(b)))
+	if len(b) < len(*id) {
+		return 0, newErrTooShort(uint(len(*id)), uint(len(b)))
 	}
 	copy(b, (*id)[:])
-	return ivSize, nil
+	return len(*id), nil
 }
 
 type messagesContainerHeadersData struct {
@@ -284,8 +285,8 @@ func (containerHdr *messagesContainerHeadersData) SetNextPacketID(sess *Session)
 }
 
 func (containerHdr *messagesContainerHeadersData) calculatePoly1305Key(cipherKey []byte) (result [32]byte) {
-	copy(result[:ivSize], containerHdr.PacketID[:])
-	copy(result[ivSize:], cipherKey)
+	copy(result[:len(containerHdr.PacketID)], containerHdr.PacketID[:])
+	copy(result[len(containerHdr.PacketID):], cipherKey)
 	for idx := range result {
 		result[idx] ^= poly1305KeyXORer[idx]
 	}
@@ -297,7 +298,7 @@ func (containerHdr *messagesContainerHeadersData) CalculateHeadersChecksumTo(cip
 	key := containerHdr.calculatePoly1305Key(cipherKey)
 	poly1305.Sum(
 		dst,
-		unsafetools.BytesOf(containerHdr)[ivSize+poly1305.TagSize*2:],
+		unsafetools.BytesOf(containerHdr)[len(containerHdr.PacketID)+poly1305.TagSize*2:],
 		&key,
 	)
 }
@@ -321,7 +322,7 @@ func (containerHdr *messagesContainerHeadersData) Read(b []byte) (int, error) {
 		return 0, wrapError(err)
 	}
 
-	n, err := containerHdr.ReadAfterIV(b[ivSize:])
+	n, err := containerHdr.ReadAfterIV(b[len(containerHdr.PacketID):])
 	if err != nil {
 		return 0, err
 	}
@@ -342,7 +343,7 @@ func (containerHdr *messagesContainerHeadersData) ReadAfterIV(b []byte) (int, er
 	containerHdr.Reserved1 = binaryOrderType.Uint16(b)
 	b = b[2:]
 
-	return int(messagesContainerHeadersSize) - ivSize, nil
+	return int(messagesContainerHeadersSize) - len(containerHdr.PacketID), nil
 }
 
 func (containerHdr *messagesContainerHeadersData) Write(b []byte) (int, error) {
@@ -354,7 +355,7 @@ func (containerHdr *messagesContainerHeadersData) Write(b []byte) (int, error) {
 	if err != nil {
 		return 0, wrapError(err)
 	}
-	b = b[ivSize:]
+	b = b[len(containerHdr.PacketID):]
 	copy(b, containerHdr.ContainerHeadersChecksum[:])
 	b = b[poly1305.TagSize:]
 	copy(b, containerHdr.MessagesChecksum[:])
