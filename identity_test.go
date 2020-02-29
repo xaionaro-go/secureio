@@ -2,8 +2,10 @@ package secureio_test
 
 import (
 	"context"
-	"fmt"
+	"io/ioutil"
 	"math/rand"
+	"os"
+	"path"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +14,55 @@ import (
 
 	. "github.com/xaionaro-go/secureio"
 )
+
+func TestNewIdentity(t *testing.T) {
+	dirPath0, err := ioutil.TempDir(os.TempDir(), `secureio-test`)
+	assert.NoError(t, err)
+	//defer os.RemoveAll(dirPath0)
+
+	dirPath1, err := ioutil.TempDir(os.TempDir(), `secureio-test`)
+	assert.NoError(t, err)
+	//defer os.RemoveAll(dirPath1)
+
+	identity0, err := NewIdentity(dirPath0)
+	assert.NoError(t, err)
+	assert.NotNil(t, identity0)
+
+	identity1, err := NewIdentity(dirPath0)
+	assert.NoError(t, err)
+	assert.NotNil(t, identity1)
+
+	assert.Equal(t, identity0.Keys.Private, identity1.Keys.Private)
+
+	identity2, err := NewIdentityFromPrivateKey(identity0.Keys.Private)
+	assert.NoError(t, err)
+	assert.NotNil(t, identity2)
+
+	assert.Equal(t, identity0.Keys.Public, identity2.Keys.Public)
+
+	remoteIdentity0, err := NewRemoteIdentity(path.Join(dirPath1, `id_ed25519.pub`))
+	assert.Error(t, err)
+	assert.Nil(t, remoteIdentity0)
+
+	remoteIdentity0, err = NewRemoteIdentity(path.Join(dirPath0, `/id_ed25519.pub`))
+	assert.NoError(t, err)
+	assert.NotNil(t, remoteIdentity0)
+	assert.Nil(t, remoteIdentity0.Keys.Private)
+	assert.NotNil(t, remoteIdentity0.Keys.Public)
+
+	assert.Equal(t, identity0.Keys.Public, remoteIdentity0.Keys.Public)
+
+	remoteIdentity1, err := NewRemoteIdentityFromPublicKey(remoteIdentity0.Keys.Public)
+	assert.NoError(t, err)
+	assert.NotNil(t, remoteIdentity1)
+	assert.Equal(t, remoteIdentity0.Keys.Public, remoteIdentity1.Keys.Public)
+
+	_, err = NewRemoteIdentityFromPublicKey(nil)
+	assert.Error(t, err)
+
+	_, err = NewIdentityFromPrivateKey(nil)
+	assert.Error(t, err)
+}
 
 func TestIdentityMutualConfirmationOfIdentityWithPSK(t *testing.T) {
 	identity0, identity1, conn0, conn1 := testPair(t)
@@ -93,7 +144,6 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		defer fmt.Println("identity0.MutualConfirmationOfIdentity() finished")
 		keys0, err0 = identity0.MutualConfirmationOfIdentity(
 			ctx,
 			identity1,
@@ -109,7 +159,6 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		defer fmt.Println("identity1.MutualConfirmationOfIdentity() finished")
 		keys1, err1 = identity1.MutualConfirmationOfIdentity(
 			ctx,
 			identity0,

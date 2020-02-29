@@ -1,5 +1,5 @@
+[![GoDoc](https://godoc.org/github.com/xaionaro-go/secureio?status.svg)](https://pkg.go.dev/github.com/xaionaro-go/secureio?tab=doc)
 [![go report](https://goreportcard.com/badge/github.com/xaionaro-go/secureio)](https://goreportcard.com/report/github.com/xaionaro-go/secureio)
-[![GoDoc](https://godoc.org/github.com/xaionaro-go/secureio?status.svg)](https://godoc.org/github.com/xaionaro-go/secureio)
 [![Build Status](https://travis-ci.org/xaionaro-go/secureio.svg?branch=master)](https://travis-ci.org/xaionaro-go/secureio)
 [![Coverage Status](https://coveralls.io/repos/github/xaionaro-go/secureio/badge.svg?branch=master)](https://coveralls.io/github/xaionaro-go/secureio?branch=master)
 
@@ -160,13 +160,14 @@ is just ignored.
 
 # TODO
 
-* increase code-coverage to 90%
+* encrypt key-exchange with PSK hash (if set)
+* allow reordering using heap-queue.
+* allow use all message types
 * add an unit-test for key renew
 * implement `(*sendInfo).SendNow()`
 * implement smart lockers
 * check keyCreatedAt
 * error if key hasn't chagned
-* encrypt key-exchange with PSK (if set)
 * verify TS difference sanity
 * don't use `Async` for sync-writes.
 * route messenger-related errors to the messenger's handler.

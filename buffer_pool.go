@@ -31,13 +31,20 @@ func (buf *buffer) IsMonopolized() bool {
 }
 
 func (buf *buffer) SetMonopolized(prevLockID lockID, isMonopolized bool) error {
-	return buf.lockDo(prevLockID, func(lockID) {
+	var addErr error
+	lockErr := buf.lockDo(prevLockID, func(lockID) {
 		if isMonopolized {
 			atomic.StoreUint32(&buf.isMonopolized, 1)
 		} else {
-			atomic.StoreUint32(&buf.isMonopolized, 0)
+			if atomic.SwapUint32(&buf.isMonopolized, 0) == 0 {
+				addErr = newErrNotMonopolized()
+			}
 		}
 	}, !isMonopolized)
+	if lockErr != nil {
+		return lockErr
+	}
+	return addErr
 }
 
 func (buf *buffer) LockDo(prevLockID lockID, fn func(lockID)) error {

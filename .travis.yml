@@ -1,8 +1,8 @@
 language: go
 go:
   - 1.13
-  - master
+  - 1.14
 before_install:
   - go get golang.org/x/lint/golint
   - go get github.com/mattn/goveralls
-script: go test -v ./... -count=5 && go vet -v ./... && golint ./... && $GOPATH/bin/goveralls -service=travis-ci
+script: go vet -v ./... && golint ./... && $GOPATH/bin/goveralls -service=travis-ci -flags -count=20

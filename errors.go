@@ -53,7 +53,7 @@ func (err ErrPartialWrite) Error() string {
 type ErrInvalidSignature struct{}
 
 func newErrInvalidSignature() error {
-	err := errors.New(ErrPartialWrite{})
+	err := errors.New(ErrInvalidSignature{})
 	err.Traceback.CutOffFirstNLines++
 	return err
 }
@@ -63,7 +63,7 @@ func (err ErrInvalidSignature) Error() string {
 
 /*
 var (
-	ErrUnencrypted           = errors.New(`unencrypted message`)
+	errUnencrypted           = errors.New(`unencrypted message`)
 	ErrCannotCreateNewCipher = errors.New(`cannot create a new cipher instance`)
 	ErrTooBig                = errors.New("message is too big")
 	ErrAlreadyClosed         = errors.New("already closed")
@@ -94,7 +94,7 @@ func newErrWrongKeyLength(expectedLength, realLength uint) error {
 }
 
 func (err ErrWrongKeyLength) Error() string {
-	return fmt.Sprintf("wrong key length: %d != %d",
+	return fmt.Sprintf("wrong key length: real:%d != expected:%d",
 		err.RealLength, err.ExpectedLength)
 }
 
@@ -105,8 +105,10 @@ type ErrCannotLoadKeys struct {
 }
 
 func newErrCannotLoadKeys(origErr error) error {
-	err := errors.Wrap(origErr, ErrCannotLoadKeys{origErr}).(*errors.Error)
-	err.Traceback.CutOffFirstNLines += 2
+	err := errors.Wrap(origErr, ErrCannotLoadKeys{origErr})
+	if xerr, ok := err.(*errors.Error); ok {
+		xerr.Traceback.CutOffFirstNLines += 2
+	}
 	return err
 }
 func (err ErrCannotLoadKeys) Error() string {
@@ -163,16 +165,16 @@ func (err ErrTooShort) Error() string {
 	return "too short"
 }
 
-// ErrUnencrypted is an error indicates that the parsed message was
+// errUnencrypted is an error indicates that the parsed message was
 // not encrypted.
-type ErrUnencrypted struct{}
+type errUnencrypted struct{}
 
 func newErrUnencrypted() error {
-	err := errors.New(ErrUnencrypted{})
+	err := errors.New(errUnencrypted{})
 	err.Traceback.CutOffFirstNLines += 2
 	return err
 }
-func (err ErrUnencrypted) Error() string {
+func (err errUnencrypted) Error() string {
 	return "not encrypted"
 }
 
@@ -227,6 +229,19 @@ func newErrMonopolized() error {
 }
 func (err errMonopolized) Error() string {
 	return fmt.Sprintf("buffer is monopolized (this is an internal error that should never be visible to anywhere outside of this package)")
+}
+
+// errNotMonopolized is an error means that there was an attempt to free a buffer
+// which is already free.
+type errNotMonopolized struct{}
+
+func newErrNotMonopolized() error {
+	err := errors.New(errNotMonopolized{})
+	err.Traceback.CutOffFirstNLines += 2
+	return err
+}
+func (err errNotMonopolized) Error() string {
+	return fmt.Sprintf("buffer is not monopolized (this is an internal error that should never be visible to anywhere outside of this package)")
 }
 
 // ErrCanceled is an error indicates that the action was canceled. It

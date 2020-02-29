@@ -1,6 +1,7 @@
 package secureio
 
 import (
+	"sync"
 	"sync/atomic"
 )
 
@@ -17,48 +18,58 @@ type Messenger struct {
 	sess        *Session
 	handler     Handler
 	isClosed    uint32
+	wg          sync.WaitGroup
 }
 
 func newMessenger(msgType MessageType, sess *Session) *Messenger {
-	return &Messenger{
+	messenger := &Messenger{
 		messageType: msgType,
 		sess:        sess,
 	}
+	messenger.wg.Add(1)
+	return messenger
 }
 
 // Write sends a message of MessageType assigned to the Messenger
 // through the Session of this Messenger in the synchronous way.
-func (w *Messenger) Write(p []byte) (int, error) {
-	return w.sess.WriteMessage(w.messageType, p)
+func (messenger *Messenger) Write(p []byte) (int, error) {
+	return messenger.sess.WriteMessage(messenger.messageType, p)
 }
 
 // WriteAsync sends a message of MessageType assigned to the Messenger
 // through the Session of this Messenger in the asynchronous way.
-func (w *Messenger) WriteAsync(p []byte) *SendInfo {
-	return w.sess.WriteMessageAsync(w.messageType, p)
+func (messenger *Messenger) WriteAsync(p []byte) *SendInfo {
+	return messenger.sess.WriteMessageAsync(messenger.messageType, p)
 }
 
-func (w *Messenger) handle(b []byte) error {
-	return w.handler.Handle(b)
+func (messenger *Messenger) handle(b []byte) error {
+	return messenger.handler.Handle(b)
 }
 
 // Close closes the defined Handler.
 //
 // See `(*Messenger).SetHandler`
-func (w *Messenger) Close() error {
-	if atomic.SwapUint32(&w.isClosed, 1) != 0 {
+func (messenger *Messenger) Close() error {
+	if atomic.SwapUint32(&messenger.isClosed, 1) != 0 {
 		return nil
 	}
 	var err error
-	if closer, ok := w.handler.(interface{ Close() error }); ok {
+	if closer, ok := messenger.handler.(interface{ Close() error }); ok {
 		err = closer.Close()
 	}
+	messenger.wg.Done()
 	return err
 }
 
 // SetHandler sets the handler for incoming traffic.
-func (w *Messenger) SetHandler(handler Handler) {
-	w.handler = handler
+func (messenger *Messenger) SetHandler(handler Handler) {
+	messenger.handler = handler
+}
+
+// WaitForClosure waits until the Messenger will be closed and will finish
+// everything.
+func (messenger *Messenger) WaitForClosure() {
+	messenger.wg.Wait()
 }
 
 type dummyMessenger struct {

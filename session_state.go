@@ -34,8 +34,6 @@ const (
 
 	// SessionStateClosing is a transition state to SessionStateClosed
 	SessionStateClosing
-
-	sessionStateInTransition
 )
 
 type sessionStateStorage struct {
@@ -66,8 +64,6 @@ func (state SessionState) String() string {
 		return `paused`
 	case SessionStateClosing:
 		return `closing`
-	case sessionStateInTransition:
-		return `in_transition`
 	}
 	return `unknown`
 }

@@ -106,7 +106,7 @@ func (sendInfo *SendInfo) Release() {
 		panic("Release() was called on a non-finished sendInfo")
 	}
 	refCount := atomic.AddInt32(&sendInfo.refCount, -1)
-	if refCount != 0 {
+	if refCount > 0 {
 		return
 	}
 	if refCount < 0 {

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"runtime"
 	"sync"
 	"time"
@@ -98,6 +99,9 @@ type keyExchanger struct {
 	successNotifyChan     chan uint64
 	keyUpdateLocker       lockerRWMutex
 	skipKeyUpdateUntil    time.Time
+
+	cryptoRandReader io.Reader
+	wg               sync.WaitGroup
 }
 
 // KeyExchangerOptions is used to configure the key exchanging options.
@@ -226,10 +230,11 @@ func newKeyExchanger(
 	return kx
 }
 
-func (kx *keyExchanger) RLockDo(fn func()) {
-	kx.locker.RLock()
-	defer kx.locker.RUnlock()
-	fn()
+func (kx *keyExchanger) getCryptoRandReader() io.Reader {
+	if kx.cryptoRandReader == nil {
+		return rand.Reader
+	}
+	return kx.cryptoRandReader
 }
 
 func (kx *keyExchanger) LockDo(fn func()) {
@@ -246,7 +251,9 @@ func (kx *keyExchanger) generateSharedKey(
 		if err != nil {
 			err.SetFormat(xerrors.FormatOneLine)
 		}
-		kx.messenger.sess.debugf("[kx] generatedSharedKey() -> %v, %v", sharedKey, err)
+		if kx.messenger != nil {
+			kx.messenger.sess.debugf("[kx] generatedSharedKey() -> %v, %v", sharedKey, err)
+		}
 	}()
 
 	if localPrivateKey == nil {
@@ -274,15 +281,6 @@ func (kx *keyExchanger) generateSharedKey(
 	}
 
 	return key, nil
-}
-
-func (kx *keyExchanger) isDone() bool {
-	select {
-	case <-kx.ctx.Done():
-		return true
-	default:
-		return false
-	}
 }
 
 func (kx *keyExchanger) updateSecrets() (err error) {
@@ -366,6 +364,12 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 
 	kx.messenger.sess.debugf("[kx] received msg: %+v", msg)
 	kx.LockDo(func() {
+		select {
+		case <-kx.ctx.Done():
+			err = newErrAlreadyClosed()
+			return
+		default:
+		}
 		defer func() { err = wrapError(err) }()
 
 		if kx.remoteSessionID == nil {
@@ -394,13 +398,15 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 		}
 
 		if msg.Flags.IsAnswer() || kx.options.AnswersMode != KeyExchangeAnswersModeAnswerAndWait {
-			kx.lastExchangeTS = time.Now()
+			kx.lastExchangeTS = timeNow()
 			kx.sendSuccessNotifications()
 		}
 
 		if !msg.Flags.IsAnswer() && kx.options.AnswersMode != KeyExchangeAnswersModeDisable {
 			// Send answer
+			kx.wg.Add(1)
 			go func() {
+				defer kx.wg.Done()
 				kx.mustSendPublicKey(true)
 			}()
 		}
@@ -449,7 +455,11 @@ func (kx *keyExchanger) stop() {
 
 func (kx *keyExchanger) start() {
 	kx.messenger.sess.debugf("[kx] kx.start()")
-	go kx.loop()
+	kx.wg.Add(1)
+	go func() {
+		defer kx.wg.Done()
+		kx.loop()
+	}()
 }
 
 func (kx *keyExchanger) loop() {
@@ -471,14 +481,17 @@ func (kx *keyExchanger) loop() {
 
 func (kx *keyExchanger) updateLocalKey() (result uint64) {
 	var isAlreadyInProgress bool
+	var nextLocalKeyCreatedAt uint64
 	kx.keyLocker.RLockDo(func() {
 		isAlreadyInProgress = kx.nextLocalKeyCreatedAt > kx.localKeyCreatedAt
+		nextLocalKeyCreatedAt = kx.nextLocalKeyCreatedAt
 	})
 	if isAlreadyInProgress {
-		panic("isAlreadyInProgress")
+		kx.messenger.sess.debugf("[kx] is already in progress: %v", nextLocalKeyCreatedAt)
+		return nextLocalKeyCreatedAt
 	}
 
-	privKey, pubKey, err := kx.ecdh.GenerateKey(rand.Reader)
+	privKey, pubKey, err := kx.ecdh.GenerateKey(kx.getCryptoRandReader())
 	if err != nil {
 		_ = kx.Close()
 		kx.errFunc(xerrors.Errorf("[kx] unable to generate ECDH keys: %w", err))
@@ -489,7 +502,7 @@ func (kx *keyExchanger) updateLocalKey() (result uint64) {
 	kx.keyLocker.LockDo(func() {
 		kx.nextLocalPrivateKey = &privKeyCasted
 		kx.nextLocalPublicKey = &pubKeyCasted
-		kx.nextLocalKeyCreatedAt = uint64(time.Now().UnixNano())
+		kx.nextLocalKeyCreatedAt = uint64(timeNow().UnixNano())
 		if kx.nextLocalKeyCreatedAt <= kx.localKeyCreatedAt { // could happen due to time re-synchronization
 			kx.nextLocalKeyCreatedAt = kx.localKeyCreatedAt + 1
 		}
@@ -524,7 +537,7 @@ func (kx *keyExchanger) KeyUpdateSendWait() {
 		}
 
 		// Update the key (and increase nextKeyCreatedAt)
-		if time.Now().Before(kx.skipKeyUpdateUntil) {
+		if timeNow().Before(kx.skipKeyUpdateUntil) {
 			kx.messenger.sess.debugf("[kx] somebody already updated the key, skipping key-update iteration.")
 			return
 		}
@@ -604,7 +617,7 @@ func (kx *keyExchanger) mustSendPublicKey(isAnswer bool) {
 func (kx *keyExchanger) sendPublicKey(isAnswer bool) error {
 	if kx.nextLocalPublicKey == nil && isAnswer {
 		kx.updateLocalKey()
-		kx.skipKeyUpdateUntil = time.Now().Add(kx.options.KeyUpdateInterval)
+		kx.skipKeyUpdateUntil = timeNow().Add(kx.options.KeyUpdateInterval)
 	}
 	kx.messenger.sess.debugf("[kx] kx.sendPublicKey(isAnswer: %v)", isAnswer)
 	msg := &keySeedUpdateMessage{}
@@ -636,4 +649,10 @@ func (kx *keyExchanger) send(msg *keySeedUpdateMessage) error {
 	}
 
 	return nil
+}
+
+// WaitForClosure waits until the keyExchanger will be closed and will finish
+// everything.
+func (kx *keyExchanger) WaitForClosure() {
+	kx.wg.Wait()
 }

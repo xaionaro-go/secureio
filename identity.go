@@ -15,8 +15,8 @@ import (
 
 const (
 	//authorizedKeysFileName = `authorized_keys`
-	publicFileName  = `id_ed25519`
-	privateFileName = `id_ed25519.pub`
+	privateFileName = `id_ed25519`
+	publicFileName  = `id_ed25519.pub`
 )
 
 // Keys is a key pair used to generate signatures (to be verified on
@@ -41,6 +41,8 @@ type Keys struct {
 // of the remote side.
 type Identity struct {
 	Keys Keys
+
+	cryptoRandReader io.Reader
 }
 
 /*func init() {
@@ -97,7 +99,11 @@ func NewIdentityFromPrivateKey(privKey ed25519.PrivateKey) (*Identity, error) {
 // used only as a remote identity (see `Identity`).
 func NewRemoteIdentity(keyPath string) (*Identity, error) {
 	i := &Identity{}
-	return i, loadPublicKeyFromFile(&i.Keys.Public, keyPath)
+	err := loadPublicKeyFromFile(&i.Keys.Public, keyPath)
+	if err != nil {
+		return nil, xerrors.Errorf("unable to load a public key from file '%s': %w", keyPath, err)
+	}
+	return i, nil
 }
 
 // NewRemoteIdentityFromPublicKey is a constructor for `Identity` based on
@@ -123,6 +129,7 @@ func (i *Identity) savePublicKey(keysDir string) error {
 		"ED25519 PUBLIC KEY",
 		i.Keys.Public,
 		filepath.Join(keysDir, publicFileName),
+		nil,
 	)
 }
 
@@ -131,10 +138,11 @@ func (i *Identity) savePrivateKey(keysDir string) error {
 		"ED25519 PRIVATE KEY",
 		i.Keys.Private,
 		filepath.Join(keysDir, privateFileName),
+		nil,
 	)
 }
 
-func saveKeyToPemFile(keyType string, key []byte, filePath string) error {
+func saveKeyToPemFile(keyType string, key []byte, filePath string, headers map[string]string) error {
 	keyFile, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE, 0600)
 	if err != nil {
 		return xerrors.Errorf("unable to open file: %w", err)
@@ -142,7 +150,7 @@ func saveKeyToPemFile(keyType string, key []byte, filePath string) error {
 
 	keyBlock := pem.Block{
 		Type:    keyType,
-		Headers: nil,
+		Headers: headers,
 		Bytes:   key,
 	}
 
@@ -154,9 +162,16 @@ func saveKeyToPemFile(keyType string, key []byte, filePath string) error {
 	return nil
 }
 
+func (i *Identity) getCryptoRandReader() io.Reader {
+	if i.cryptoRandReader == nil {
+		return rand.Reader
+	}
+	return i.cryptoRandReader
+}
+
 func (i *Identity) generateAndSaveKeys(keysDir string) error {
 	var err error
-	i.Keys.Public, i.Keys.Private, err = ed25519.GenerateKey(rand.Reader)
+	i.Keys.Public, i.Keys.Private, err = ed25519.GenerateKey(i.getCryptoRandReader())
 	if err != nil {
 		return xerrors.Errorf("cannot generate keys: %w", err)
 	}
@@ -173,7 +188,7 @@ func (i *Identity) generateAndSaveKeys(keysDir string) error {
 func loadPublicKeyFromFile(keyPtr *ed25519.PublicKey, path string) error {
 	keyBytes, err := ioutil.ReadFile(path) // #nosec
 	if err != nil {
-		return xerrors.Errorf("unable to read key: %w", err)
+		return xerrors.Errorf("unable to read key from file '%s': %w", path, err)
 	}
 
 	block, _ := pem.Decode(keyBytes)

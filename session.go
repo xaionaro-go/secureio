@@ -41,6 +41,10 @@ const (
 	cipherBlockSize      = 1 // TODO: remove this obsolete constant
 )
 
+var (
+	timeNow = time.Now
+)
+
 func roundSize(size, blockSize uint32) uint32 {
 	return (size + (blockSize - 1)) & ^(blockSize - 1)
 }
@@ -274,12 +278,12 @@ type sessionIDGetterType struct {
 func (sessionIDGetter *sessionIDGetterType) Get() (result SessionID) {
 	sessionIDGetter.LockDo(func() {
 		for {
-			result.CreatedAt = uint64(time.Now().UnixNano())
+			result.CreatedAt = uint64(timeNow().UnixNano())
 			if result.CreatedAt != sessionIDGetter.prevTime {
 				break
 			}
 		}
-		if result.CreatedAt < sessionIDGetter.prevTime {
+		if result.CreatedAt <= sessionIDGetter.prevTime {
 			result.CreatedAt = sessionIDGetter.prevTime + 1 // could happen due to a time-resynchronization
 		}
 		sessionIDGetter.prevTime = result.CreatedAt
@@ -328,7 +332,7 @@ func newSession(
 		waitForCipherKeyChan: make(chan struct{}),
 		sendDelayedNowChan:   make(chan *SendInfo),
 		cipherKeys:           &[][][]byte{nil}[0],
-		nextPacketID:         uint64(time.Now().UnixNano()),
+		nextPacketID:         uint64(timeNow().UnixNano()),
 	}
 
 	sess.ctx, sess.cancelFunc = context.WithCancel(ctx)
@@ -372,8 +376,10 @@ func newSession(
 	sess.messageHeadersPool = newMessageHeadersPool()
 	sess.messagesContainerHeadersPool = newMessagesContainerHeadersPool()
 
-	sess.delayedSenderTimer = time.NewTimer(*sess.options.SendDelay)
-	sess.delayedSenderTimer.Stop()
+	if sess.options.SendDelay != nil {
+		sess.delayedSenderTimer = time.NewTimer(*sess.options.SendDelay)
+		sess.delayedSenderTimer.Stop()
+	}
 
 	sess.sendDelayedCond = sync.NewCond(&sess.sendDelayedCondLocker)
 
@@ -475,8 +481,6 @@ func (sess *Session) isDone() bool {
 	case SessionStateNew, SessionStateKeyExchanging,
 		SessionStateEstablished, SessionStatePaused:
 		return false
-	case sessionStateInTransition:
-		return sess.isDoneSlow()
 	}
 	return true
 }
@@ -591,7 +595,7 @@ func (sess *Session) resetReadDeadline() (err error) {
 		if sess.readInterruptsRequested <= sess.readInterruptsHappened {
 			return
 		}
-		err = sess.setBackendReadDeadline(time.Now().Add(time.Hour * 24 * 365 * 100))
+		err = sess.setBackendReadDeadline(timeNow().Add(time.Hour * 24 * 365 * 100))
 		sess.readInterruptsHappened = sess.readInterruptsRequested
 	})
 	return
@@ -650,7 +654,7 @@ func (sess *Session) readerLoop() {
 						return
 					}
 					sess.debugf("sess.backend.Read(): OK, it seems it just was an interrupt, try again...")
-					err = sess.setBackendReadDeadline(time.Now().Add(time.Hour * 24 * 365 * 100))
+					err = sess.setBackendReadDeadline(timeNow().Add(time.Hour * 24 * 365 * 100))
 					sess.readInterruptsHappened = sess.readInterruptsRequested
 				})
 			}
@@ -959,6 +963,11 @@ func (sess *Session) NewMessenger(msgType MessageType) *Messenger {
 		return nil
 	}
 	messenger := newMessenger(msgType, sess)
+	sess.stopWaitGroup.Add(1)
+	go func() {
+		defer sess.stopWaitGroup.Done()
+		messenger.WaitForClosure()
+	}()
 	sess.setMessenger(msgType, messenger)
 	return messenger
 }
@@ -996,13 +1005,6 @@ func (sess *Session) SetHandlerFuncs(
 ) {
 	messenger := sess.NewMessenger(msgType)
 	messenger.SetHandler(&handlerByFuncs{HandleFunc: handle, OnErrorFunc: onError})
-}
-
-func (sess *Session) getDelayedWriteLength() (result messageLength) {
-	sess.delayedWriteBufRLockDo(func(buf *buffer) {
-		result = messageLength(len(buf.Bytes))
-	})
-	return
 }
 
 // WriteMessage synchronously sends a message of MessageType `msgType`.
@@ -1604,6 +1606,8 @@ func (sess *Session) startKeyExchange() {
 		return
 	}
 
+	sess.stopWaitGroup.Add(1)
+
 	var keyExchangeCount uint64
 	sess.keyExchanger = newKeyExchanger(
 		sess.ctx,
@@ -1647,6 +1651,11 @@ func (sess *Session) startKeyExchange() {
 		},
 		&sess.options.KeyExchangerOptions,
 	)
+
+	go func() {
+		defer sess.stopWaitGroup.Done()
+		sess.keyExchanger.WaitForClosure()
+	}()
 }
 
 func (sess *Session) setMessenger(msgType MessageType, messenger *Messenger) {
@@ -1772,10 +1781,17 @@ func (sess *Session) interruptRead() (err error) {
 	sess.readDeadlineLocker.LockDo(func() {
 		sess.readInterruptsRequested++
 	})
-	return sess.setBackendReadDeadline(time.Now())
+	return sess.setBackendReadDeadline(timeNow())
 }
 
 func (sess *Session) startClosing() {
+	go func() {
+		select {
+		case <-time.After(sess.keyExchanger.options.Timeout):
+			sess.cancelFunc()
+		case <-sess.ctx.Done():
+		}
+	}()
 	for sess.sendDelayedNow(0, true) == 0 {
 	}
 	sess.cancelFunc()
@@ -1785,7 +1801,7 @@ func (sess *Session) startClosing() {
 // but it will return immediately (without waiting until everything will
 // finish).
 func (sess *Session) Close() error {
-	switch sess.setState(SessionStateClosing) {
+	switch sess.setState(SessionStateClosing, SessionStateClosed) {
 	case SessionStateClosed, SessionStateClosing:
 		return newErrAlreadyClosed()
 	}

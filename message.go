@@ -122,7 +122,7 @@ func (t MessageType) String() string {
 		return `undefined`
 	case t == messageTypeKeyExchange:
 		return `key_exchange`
-	case t >= MessageTypeDataPacketType0 || t <= MessageTypeDataPacketType15:
+	case t >= MessageTypeDataPacketType0 && t <= MessageTypeDataPacketType15:
 		return fmt.Sprintf(`datatype%d`, uint8(t-MessageTypeDataPacketType0))
 	}
 	return `unknown`
@@ -167,6 +167,9 @@ func (id *packetID) Value() uint64 {
 	return binaryOrderType.Uint64(id[:])
 }
 func (id *packetID) String() string {
+	if id == nil {
+		return ""
+	}
 	return fmt.Sprint(id.Value())
 }
 func (id *packetID) SetNextPacketID(sess *Session) {
@@ -192,7 +195,6 @@ type messagesContainerHeadersData struct {
 
 	ContainerHeadersChecksum [poly1305.TagSize]byte
 	MessagesChecksum         [poly1305.TagSize]byte
-	CreatedAt                uint64
 	Length                   messageLength
 	messagesContainerFlags
 	Reserved0 uint8

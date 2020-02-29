@@ -17,6 +17,7 @@ require (
 	gitlab.com/NebulousLabs/fastrand v0.0.0-20181126182046-603482d69e40 // indirect
 	golang.org/x/crypto v0.0.0-20200208060501-ecb85df21340
 	golang.org/x/sys v0.0.0-20200202164722-d101bd2416d5 // indirect
+	golang.org/x/tools v0.0.0-20200228224639-71482053b885 // indirect
 	golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543
 	lukechampine.com/blake3 v1.0.0
 	lukechampine.com/frand v1.1.0 // indirect

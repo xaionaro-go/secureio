@@ -8,7 +8,9 @@ import (
 	"math/rand"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/xaionaro-go/slice"
 	"github.com/xaionaro-go/unsafetools"
 
+	xerrors "github.com/xaionaro-go/errors"
 	. "github.com/xaionaro-go/secureio"
 )
 
@@ -49,11 +52,14 @@ func TestSessionBigWrite(t *testing.T) {
 	assert.NoError(t, sess0.Close())
 	assert.NoError(t, sess1.Close())
 
-	sess0.WaitForClosure()
-	sess1.WaitForClosure()
+	waitForClosure(t, sess0, sess1)
+}
 
-	assert.Equal(t, SessionStateClosed, sess0.GetState())
-	assert.Equal(t, SessionStateClosed, sess1.GetState())
+func waitForClosure(t *testing.T, sesss ...*Session) {
+	for _, sess := range sesss {
+		sess.WaitForClosure()
+		assert.Equal(t, SessionStateClosed, sess.GetState())
+	}
 }
 
 func TestSessionWaitForSendInfo(t *testing.T) {
@@ -96,11 +102,7 @@ func TestSessionWaitForSendInfo(t *testing.T) {
 	assert.NoError(t, sess0.Close())
 	assert.NoError(t, sess1.Close())
 
-	sess0.WaitForClosure()
-	sess1.WaitForClosure()
-
-	assert.Equal(t, SessionStateClosed, sess0.GetState())
-	assert.Equal(t, SessionStateClosed, sess1.GetState())
+	waitForClosure(t, sess0, sess1)
 }
 
 func TestSessionAsyncWrite(t *testing.T) {
@@ -153,11 +155,7 @@ func TestSessionAsyncWrite(t *testing.T) {
 	assert.NoError(t, sess0.Close())
 	assert.NoError(t, sess1.Close())
 
-	sess0.WaitForClosure()
-	sess1.WaitForClosure()
-
-	assert.Equal(t, SessionStateClosed, sess0.GetState())
-	assert.Equal(t, SessionStateClosed, sess1.GetState())
+	waitForClosure(t, sess0, sess1)
 }
 
 func TestSession_WriteMessageAsync_noHanging(t *testing.T) {
@@ -486,11 +484,7 @@ func TestHackerDuplicateMessage(t *testing.T) {
 	assert.NoError(t, sess0.Close())
 	assert.NoError(t, sess1.Close())
 
-	sess0.WaitForClosure()
-	sess1.WaitForClosure()
-
-	assert.Equal(t, SessionStateClosed, sess0.GetState())
-	assert.Equal(t, SessionStateClosed, sess1.GetState())
+	waitForClosure(t, sess0, sess1)
 }
 
 func TestSessionID_Bytes(t *testing.T) {
@@ -500,4 +494,107 @@ func TestSessionID_Bytes(t *testing.T) {
 	idBytes := id.Bytes()
 	idCmp.FillFromBytes(idBytes[:])
 	assert.Equal(t, id, idCmp)
+}
+
+func TestSession_uncovered(t *testing.T) {
+	ctx := context.Background()
+	identity0, identity1, _, _ := testPair(t)
+	opts := &SessionOptions{
+		EnableDebug:                        true,
+		EnableInfo:                         true,
+		ErrorOnSequentialDecryptFailsCount: &[]uint64{0}[0],
+		SendDelay:                          &[]time.Duration{0}[0],
+	}
+	conn := newErroneousConn()
+	sess0 := identity0.NewSession(ctx, identity1, conn, &testLogger{t, nil}, opts)
+	assert.NotEqual(t, SessionID{}, sess0.ID())
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer func() {
+			errString := fmt.Sprint(recover())
+			assert.True(t, strings.Index(errString, "should not happen") != -1, errString)
+			wg.Done()
+		}()
+		writeBuf := make([]byte, 1)
+		_, err := sess0.Write(writeBuf)
+		assert.NoError(t, err)
+	}()
+	runtime.Gosched()
+	close(*unsafetools.FieldByName(sess0, `waitForCipherKeyChan`).(*chan struct{}))
+	runtime.Gosched()
+	conn.SetError(errors.New("unit-test"))
+	runtime.Gosched()
+	wg.Wait()
+	*unsafetools.FieldByName(sess0, `isReadingValue`).(*uint64) = 1
+	_ = sess0.CloseAndWait()
+}
+
+func TestSession_WriteMessageTooBig(t *testing.T) {
+	ctx := context.Background()
+
+	identity0, identity1, conn0, _ := testPair(t)
+
+	opts := &SessionOptions{
+		OnInitFuncs: []OnInitFunc{func(sess *Session) {
+			printLogsOfSession(t, true, sess)
+		}},
+		EnableDebug: true,
+	}
+
+	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
+	writeBuf := make([]byte, sess0.GetMaxPayloadSize()*2)
+	rand.Read(writeBuf)
+
+	_, err := sess0.Write(writeBuf)
+	assert.Error(t, err)
+	_ = sess0.CloseAndWait()
+}
+
+func TestSession_answerModeMismatch(t *testing.T) {
+	ctx, cancelFunc := context.WithCancel(context.Background())
+
+	identity0, identity1, conn0, conn1 := testPair(t)
+
+	opts0 := &SessionOptions{
+		KeyExchangerOptions: KeyExchangerOptions{
+			AnswersMode: KeyExchangeAnswersModeDisable,
+		},
+	}
+	opts1 := &SessionOptions{
+		KeyExchangerOptions: KeyExchangerOptions{
+			AnswersMode: KeyExchangeAnswersModeAnswerAndWait,
+		},
+	}
+
+	receivedMismatch := false
+	var errorHandlerCallCount uint64
+	errorHandler := func(sess *Session, err error) bool {
+		atomic.AddUint64(&errorHandlerCallCount, 1)
+		xerr := err.(*xerrors.Error)
+		receivedMismatch = receivedMismatch || xerr.Has(ErrAnswersModeMismatch{})
+		return false
+	}
+	sess0 := identity0.NewSession(ctx, identity1, conn0, wrapErrorHandler(nil, errorHandler), opts0)
+	sess1 := identity1.NewSession(ctx, identity0, conn1, wrapErrorHandler(nil, errorHandler), opts1)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sess0.WaitForClosure()
+		cancelFunc()
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sess1.WaitForClosure()
+		cancelFunc()
+	}()
+
+	sess0.WaitForClosure()
+	sess1.WaitForClosure()
+
+	assert.True(t, receivedMismatch)
 }

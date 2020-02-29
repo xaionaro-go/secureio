@@ -1,0 +1,83 @@
+package secureio
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/aead/ecdh"
+	"github.com/stretchr/testify/assert"
+
+	xerrors "github.com/xaionaro-go/errors"
+)
+
+func testKeyExchanger(t *testing.T, errFunc func(error)) *keyExchanger {
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	kx := &keyExchanger{
+		ctx:        ctx,
+		cancelFunc: cancelFunc,
+		doneFunc:   cancelFunc,
+		errFunc:    errFunc,
+		ecdh:       ecdh.X25519(),
+		messenger: &Messenger{sess: &Session{
+			ctx:                          ctx,
+			backend:                      newErroneousConn(),
+			state:                        newSessionStateStorage(),
+			cipherKeys:                   &[][][]byte{nil}[0],
+			sendInfoPool:                 newSendInfoPool(),
+			messageHeadersPool:           newMessageHeadersPool(),
+			messagesContainerHeadersPool: newMessagesContainerHeadersPool(),
+			bufferPool:                   newBufferPool(1),
+			maxPacketSize:                maxPossiblePacketSize,
+			waitForCipherKeyChan:         make(chan struct{}),
+			options: SessionOptions{
+				MaxPayloadSize: maxPayloadSize,
+			},
+		}},
+		localIdentity:  testIdentity(t),
+		remoteIdentity: testIdentity(t),
+	}
+	kx.messenger.sess.setSecrets([][]byte{make([]byte, 32), make([]byte, 32), make([]byte, 32), make([]byte, 32)})
+	return kx
+}
+
+func TestKeyExchanger_generateSharedKey_negative(t *testing.T) {
+	errCount := 0
+	kx := testKeyExchanger(t, func(err error) {
+		errCount++
+	})
+
+	func() {
+		defer func() {
+			assert.True(t, strings.Index(fmt.Sprintf("%v", recover()), `should not happen`) != -1)
+		}()
+		var a [32]byte
+		_, _ = kx.generateSharedKey(&a, &a)
+	}()
+
+	assert.True(t, kx.Handle(nil).(*xerrors.Error).Has(ErrTooShort{}))
+	assert.True(t, kx.Handle(make([]byte, 65536)).(*xerrors.Error).Has(ErrInvalidSignature{}))
+	assert.NotZero(t, kx.updateLocalKey())
+	assert.NotZero(t, kx.updateLocalKey())
+	kx.nextLocalKeyCreatedAt = kx.localKeyCreatedAt
+	kx.cryptoRandReader = &bytes.Buffer{}
+	assert.Zero(t, kx.updateLocalKey())
+	assert.Equal(t, 1, errCount)
+	kx.cancelFunc()
+	kx.sendSuccessNotifications()
+}
+
+func TestKeyExchanger_KeyUpdateSendWait_timeout(t *testing.T) {
+	errCount := 0
+	kx := testKeyExchanger(t, func(err error) {
+		errCount++
+		assert.True(t, err.(*xerrors.Error).Has(ErrKeyExchangeTimeout{}), err)
+	})
+	kx.options.Timeout = time.Nanosecond
+	kx.options.RetryInterval = time.Hour
+	kx.KeyUpdateSendWait()
+	assert.Equal(t, 1, errCount)
+}
