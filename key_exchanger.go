@@ -380,6 +380,7 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 				nextRemoteHasChanged = false
 				return
 			}
+			kx.prevRemotePublicKey = kx.nextRemotePublicKey
 			kx.nextRemotePublicKey = &msg.PublicKey
 		})
 		if !nextRemoteHasChanged {
@@ -496,6 +497,7 @@ func (kx *keyExchanger) updateLocalKey() (result uint64) {
 	privKeyCasted := privKey.([curve25519PrivateKeySize]byte)
 	pubKeyCasted := pubKey.([curve25519PublicKeySize]byte)
 	kx.keyLocker.LockDo(func() {
+		kx.prevLocalPrivateKey = kx.nextLocalPrivateKey
 		kx.nextLocalPrivateKey = &privKeyCasted
 		kx.nextLocalPublicKey = &pubKeyCasted
 		kx.nextLocalKeyCreatedAt = uint64(timeNow().UnixNano())

@@ -57,6 +57,8 @@ const (
 )
 
 var (
+	// timeNow is a function used instead of time.Now. It may be
+	// reasonable to override it for unit-tests.
 	timeNow = time.Now
 )
 

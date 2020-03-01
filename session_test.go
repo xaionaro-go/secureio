@@ -1,6 +1,7 @@
 package secureio_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -584,4 +585,59 @@ func TestSession_answerModeMismatch(t *testing.T) {
 	sess1.WaitForClosure()
 
 	assert.True(t, receivedMismatch)
+}
+
+func TestSessionKeyRenew(t *testing.T) {
+	ctx := context.Background()
+
+	identity0, identity1, conn0, conn1 := testPair(t)
+
+	opts := &SessionOptions{
+		OnInitFuncs: []OnInitFunc{func(sess *Session) {
+			printLogsOfSession(t, true, sess)
+		}},
+		EnableDebug: true,
+		KeyExchangerOptions: KeyExchangerOptions{
+			KeyUpdateInterval: time.Microsecond,
+			RetryInterval:     time.Hour * 24 * 365, /* never */
+			PSK:               []byte{1, 2, 3},
+		},
+	}
+
+	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
+	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{t, nil}, opts)
+
+	for {
+		if sess0.GetCipherKeysWait()[3] != nil {
+			break
+		}
+		runtime.Gosched()
+	}
+
+	for {
+		if sess1.GetCipherKeysWait()[3] != nil {
+			break
+		}
+		runtime.Gosched()
+	}
+
+	sess0.CloseAndWait()
+	sess1.CloseAndWait()
+	runtime.Gosched()
+
+	keys0 := sess0.GetCipherKeys()
+	keys1 := sess1.GetCipherKeys()
+
+	for i := 0; i < len(keys0); i++ {
+		key0 := keys0[i]
+		assert.NotNil(t, key0)
+		for j := 0; j < len(keys1); j++ {
+			key1 := keys1[j]
+			assert.NotNil(t, key1)
+			if bytes.Compare(key0, key1) == 0 {
+				return
+			}
+		}
+	}
+	assert.Fail(t, "no key matches were found", fmt.Sprint(keys0, keys1))
 }
