@@ -33,6 +33,8 @@ func TestPacketIDStorage_setAtOffset(t *testing.T) {
 	stor.setAtOffset(67, true)
 	assert.Equal(t, uint64(0), stor.table[0])
 	assert.Equal(t, uint64(8), stor.table[1])
+	stor.setAtOffset(67, false)
+	assert.Equal(t, uint64(0), stor.table[1])
 }
 
 func TestPacketIDStorage_Push(t *testing.T) {

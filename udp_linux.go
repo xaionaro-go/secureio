@@ -8,6 +8,7 @@ import (
 )
 
 func udpSetNoFragment(conn *net.UDPConn) (err error) {
+	defer func() { err = wrapError(err) }()
 	var syscallConn syscall.RawConn
 	syscallConn, err = conn.SyscallConn()
 	if err != nil {
