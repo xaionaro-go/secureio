@@ -67,11 +67,11 @@ sendInfo := session.WriteMessageAsync(secureio.MessageTypeChannel(0), payload)
 // Wait until the real sending
 <-sendInfo.Done()
 
-// It's not necessary, but helps to reduce the pressure on GC (so to optimize CPU and RAM utilization)
-sendInfo.Release()
-
 // Here you get the error if any:
 err := sendInfo.Err
+
+// It's not necessary, but helps to reduce the pressure on GC (so to optimize CPU and RAM utilization)
+sendInfo.Release()
 ```
 
 #### MessageTypes
