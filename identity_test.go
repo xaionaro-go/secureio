@@ -8,6 +8,7 @@ import (
 	"path"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -78,7 +79,8 @@ func testIdentityMutualConfirmationOfIdentityWithPSKs(t *testing.T, shouldFail b
 	opts0.EnableDebug = true
 	opts1.EnableDebug = true
 
-	ctx := context.Background()
+	ctx, cancelFunc := context.WithDeadline(context.Background(), time.Now().Add(time.Second*5))
+	defer cancelFunc()
 
 	var wg sync.WaitGroup
 
@@ -91,7 +93,6 @@ func testIdentityMutualConfirmationOfIdentityWithPSKs(t *testing.T, shouldFail b
 			ctx,
 			identity1,
 			conn0,
-			//&dummyEventHandler{},
 			&testLogger{t, nil},
 			opts0,
 		)
@@ -106,7 +107,6 @@ func testIdentityMutualConfirmationOfIdentityWithPSKs(t *testing.T, shouldFail b
 			ctx,
 			identity0,
 			conn1,
-			//&dummyEventHandler{},
 			&testLogger{t, nil},
 			opts1,
 		)

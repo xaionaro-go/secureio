@@ -33,6 +33,20 @@ const (
 	// It is used to merge small messages into one while sending it
 	// through the backend to reduce overheads.
 	DefaultSendDelay = time.Microsecond * 50
+
+	// DefaultPacketIDStorageSize defines the default value for
+	// SessionOptions.PacketIDStorageSize.
+	//
+	// Due to internal-implementation-specifics the value will
+	// be automatically round-up to be aligned to 64.
+	//
+	// Don't use big values here (e.g. >4096):
+	// T: O(n)
+	// S: O(n)
+	//
+	// It seems to unlikely to misorder a packet for a more than
+	// 256 packets.
+	DefaultPacketIDStorageSize = 256
 )
 
 const (
@@ -100,7 +114,6 @@ type Session struct {
 	waitForCipherKeyChan chan struct{}
 	eventHandler         EventHandler
 	stopWaitGroup        sync.WaitGroup
-	lastReceivedPacketID uint64
 
 	bufferPool                   *bufferPool
 	sendInfoPool                 *sendInfoPool
@@ -130,7 +143,8 @@ type Session struct {
 	infoOutputChan  chan DebugOutputEntry
 	debugOutputChan chan DebugOutputEntry
 
-	nextPacketID uint64
+	receivedPacketIDs *packetIDStorage
+	nextPacketID      uint64
 
 	pauseWaitLocker sync.Mutex
 	pauseLocker     lockerMutex
@@ -213,14 +227,26 @@ type SessionOptions struct {
 	// the Session (but after performing the self-configuration).
 	OnInitFuncs []OnInitFunc
 
-	// AllowReorderingAndDuplication disables checks of
-	// the timestamps (within messages). So even if messages
-	// are in a wrong order they still will be interpreted.
+	// PacketIDStorageSize defines how many PacketID values could be
+	// remembered to be able to check if packet was duplicated or
+	// reordered.
 	//
-	// Warning! It makes the connection more resilient, but allows
-	// hackers to duplicate your messages. Which could be insecure
-	// in some use cases.
-	AllowReorderingAndDuplication bool
+	// By default we try to eliminate possibility of duplicate packets
+	// because it could be used by malefactors. So we remember
+	// few (PacketIDStorageSize) highest values of received PacketID
+	// values and:
+	// * Drop if a packet has an ID we already remembered
+	// * Drop if a packet has an ID lower than any remembered.
+	//
+	// If it's required to disable mechanism to drop packets
+	// with invalid PacketID then set a negative value.
+	//
+	// Value "1" is a special value which enables the behaviour
+	// where PacketID is allowed to grow only (no misorder is allowed).
+	//
+	// The default value (which is forced on a zero value) is
+	// DefaultPacketIDStorageSize.
+	PacketIDStorageSize int
 }
 
 // OnInitFunc is a function which will be called after a Session
@@ -358,6 +384,17 @@ func newSession(
 	if *sess.options.SendDelay <= 0 {
 		sess.options.SendDelay = nil
 	}
+	if sess.options.PacketIDStorageSize == 0 {
+		sess.options.PacketIDStorageSize = DefaultPacketIDStorageSize
+	}
+	if sess.options.PacketIDStorageSize > 0 {
+		storageSize := uint(sess.options.PacketIDStorageSize)
+		if storageSize == 1 {
+			storageSize--
+		}
+		sess.receivedPacketIDs = newPacketIDStorage(storageSize)
+	}
+
 	if sess.options.MaxPayloadSize == 0 {
 		sess.options.MaxPayloadSize = atomic.LoadUint32(&maxPayloadSize)
 	}
@@ -612,6 +649,14 @@ func (sess *Session) resetReadDeadline() (err error) {
 	return
 }
 
+func (sess *Session) checkAndRememberPacketID(packetID uint64) (isOK bool) {
+	if sess.receivedPacketIDs == nil {
+		return true
+	}
+	sess.debugf("checkAndRememberPackerID(%v)", packetID)
+	return sess.receivedPacketIDs.Push(packetID)
+}
+
 func (sess *Session) readerLoop() {
 	defer func() {
 		sess.debugf("/readerLoop: state:%v isDoneSlow:%v", sess.state.Load(), sess.isDoneSlow())
@@ -725,16 +770,14 @@ func (sess *Session) readerLoop() {
 			continue
 		}
 		packetID := containerHdr.PacketID.Value()
-		if !sess.options.AllowReorderingAndDuplication &&
-			packetID <= sess.lastReceivedPacketID {
+		if !sess.checkAndRememberPacketID(packetID) {
 			sess.ifDebug(func() {
-				sess.debugf(`wrong order: %v is not greater than %v`,
-					packetID, sess.lastReceivedPacketID)
+				sess.debugf(`wrong order: dropping the packet with ID %v`,
+					packetID)
 			})
 			atomic.AddUint64(&sess.unexpectedPacketIDCount, 1)
 			continue
 		}
-		sess.lastReceivedPacketID = packetID
 		atomic.StoreUint64(&sess.sequentialDecryptFailsCount, 0)
 
 		sess.processIncomingMessages(containerHdr, messagesBytes)

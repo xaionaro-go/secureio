@@ -466,19 +466,6 @@ func TestHackerDuplicateMessage(t *testing.T) {
 	wg.Wait()
 	assert.True(t, successfullyIgnoredTheDuplicate)
 
-	// Disabling the defensive mechanism and trying again,
-	// now we should receive the duplicate:
-	unsafetools.FieldByName(sess1, `options`).(*SessionOptions).AllowReorderingAndDuplication = true
-
-	_, err = conn0.Write(interceptedMessage)
-	assert.NoError(t, err)
-
-	slice.SetZeros(readBuf)
-	_, err = sess1.Read(readBuf)
-	assert.NoError(t, err)
-
-	assert.Equal(t, writeBuf, readBuf)
-
 	// The test is passed, closing...
 
 	assert.NoError(t, sess0.Close())

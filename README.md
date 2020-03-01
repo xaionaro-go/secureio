@@ -149,7 +149,7 @@ The combination of `PacketID` and `SessionID` is used as IV/NONCE
 for XChaCha20 and `cipherKey` is used as the key.
 
 Worth to mention that `PacketID` is intended to be unique only
-within a Session. So it just starts with zero and then grows
+within a Session. So it just starts with zero and then increases
 by 1 for each next message. Therefore if the system clock is
 broken then uniqueness of NONCE is guaranteed by 64-bit random
 value of `SessionID`.
@@ -161,13 +161,13 @@ used a blake3.Sum256 hash of:
  - [concatenation of `PacketID` and `cipherKey` XOR-ed](https://github.com/xaionaro-go/secureio/blob/ccd4d864545620b5483c88df91491817e4f0a442/message.go#L267) 
 by a [constant value](https://github.com/xaionaro-go/secureio/blob/ccd4d864545620b5483c88df91491817e4f0a442/message.go#L40).
 
-`PacketID` is allowed to grow only. If it was received a packet
-with the same `PacketID` (as before) or with a lesser `PackerID` then the packet
+`PacketID` is supposed to be increasing only. Received PacketID are remembered in a limited
+window of values. If it was received a packet with the same `PacketID` (as it already was) or
+with a lesser `PackerID` (than the minimal possible value in the window) then the packet
 is just ignored.
 
 # TODO
 
-* allow reordering using heap-queue.
 * allow use all message types
 * add an unit-test for key renew
 * implement `(*sendInfo).SendNow()`

@@ -21,7 +21,7 @@ func TestMissedKeySeedMessage(t *testing.T) {
 	opts.OnInitFuncs = []OnInitFunc{func(sess *Session) { printLogsOfSession(t, false, sess) }}
 	opts.EnableDebug = true
 	opts.EnableInfo = true
-	opts.AllowReorderingAndDuplication = true                 // it's UDP :(
+	opts.PacketIDStorageSize = -1                             // it's UDP :(
 	opts.KeyExchangerOptions.RetryInterval = time.Millisecond // speed-up the unit test
 
 	ctx := context.Background()
