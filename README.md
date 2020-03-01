@@ -112,7 +112,7 @@ BenchmarkSessionWriteMessageAsyncRead64000-8          	   15435	     77898 ns/op
 ```
 
 This package is designed to be asynchronous, so
-basically `Write` is an stupid around code of `WriteMessageAsync`.
+basically `Write` is an stupid wrapper around code of `WriteMessageAsync`.
 To get more throughput it merges all your messages collected
 in 50 microseconds into a one, sends, and then splits them back. It
 allows to reduce amount of syscalls and other overheads. So to achieve
