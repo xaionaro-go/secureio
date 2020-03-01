@@ -175,7 +175,6 @@ is just ignored.
 
 # TODO
 
-* implement `(*sendInfo).SendNow()`
 * implement smart lockers
 * check keyCreatedAt
 * error if key hasn't changed

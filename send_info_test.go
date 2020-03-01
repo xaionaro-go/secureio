@@ -12,7 +12,7 @@ func TestSendInfo_SendID(t *testing.T) {
 }
 
 func TestSendInfoPool_positive(t *testing.T) {
-	pool := newSendInfoPool()
+	pool := newSendInfoPool(nil)
 	sendInfo := pool.AcquireSendInfo(context.Background())
 	close(sendInfo.c)
 	sendInfo.Release()
@@ -24,7 +24,7 @@ func TestSendInfoPool_releaseNonClosed(t *testing.T) {
 		assert.NotNil(t, err)
 	}()
 
-	pool := newSendInfoPool()
+	pool := newSendInfoPool(nil)
 	sendInfo := pool.AcquireSendInfo(context.Background())
 	sendInfo.Release()
 }
@@ -35,7 +35,7 @@ func TestSendInfoPool_releaseNonBusy(t *testing.T) {
 		assert.NotNil(t, err)
 	}()
 
-	pool := newSendInfoPool()
+	pool := newSendInfoPool(nil)
 	sendInfo := pool.AcquireSendInfo(context.Background())
 	close(sendInfo.c)
 	sendInfo.isBusy = false
@@ -48,7 +48,7 @@ func TestSendInfoPool_acquireBusy(t *testing.T) {
 		assert.NotNil(t, err)
 	}()
 
-	pool := newSendInfoPool()
+	pool := newSendInfoPool(nil)
 	sendInfo := pool.AcquireSendInfo(context.Background())
 	close(sendInfo.c)
 	sendInfo.Release()
@@ -57,7 +57,7 @@ func TestSendInfoPool_acquireBusy(t *testing.T) {
 }
 
 func TestSendInfo_String(t *testing.T) {
-	pool := newSendInfoPool()
+	pool := newSendInfoPool(nil)
 	sendInfo0 := pool.AcquireSendInfo(context.Background())
 	sendInfo1 := pool.AcquireSendInfo(context.Background())
 	assert.Equal(t, sendInfo0.String(), sendInfo0.String())

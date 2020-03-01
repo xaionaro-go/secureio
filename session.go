@@ -18,7 +18,6 @@ import (
 	"unsafe"
 
 	"github.com/aead/chacha20/chacha"
-	"github.com/mohae/deepcopy"
 	"golang.org/x/crypto/poly1305"
 
 	xerrors "github.com/xaionaro-go/errors"
@@ -178,6 +177,9 @@ type DebugOutputEntry struct {
 type SessionOptions struct {
 	// EnableDebug enables the DEBUG messages to be passed through
 	// `(*Session).DebugOutputChan()`. It causes performance penalty.
+	//
+	// This option will work only if the application was built
+	// with tag "secureiodebug" (and/or "testlogging").
 	EnableDebug bool
 
 	// EnableInfo enables the INFO messages to be passed through
@@ -415,7 +417,7 @@ func newSession(
 	sess.delayedWriteBuf = sess.bufferPool.AcquireBuffer()
 	sess.delayedWriteBuf.Bytes = sess.delayedWriteBuf.Bytes[:0]
 
-	sess.sendInfoPool = newSendInfoPool()
+	sess.sendInfoPool = newSendInfoPool(sess)
 	sess.delayedSendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 
 	sess.readItemPool = newReadItemPool()
@@ -1171,6 +1173,8 @@ func (sess *Session) WriteMessageAsync(
 	msgType MessageType,
 	payload []byte,
 ) (sendInfo *SendInfo) {
+	defer func() { sess.debugf("WriteMessageAsync() -> %+v", sendInfo) }()
+
 	// if msgType == messageType_keyExchange or SendDelay is zero then
 	// it will write the message synchronously anyway.
 	if uint32(len(payload)) > sess.GetMaxPayloadSize() {
@@ -1257,8 +1261,8 @@ func (sess *Session) writeMessageAsync(
 					return
 				}
 
-				sess.debugf("no more space left in the buffer (%p), sending now: %v (> %v)",
-					buf, packetSize, sess.GetMaxPacketSize())
+				sess.debugf("no more space left in the buffer, sending now: %v (> %v)",
+					packetSize, sess.GetMaxPacketSize())
 
 				sendInfo = sess.delayedSendInfo
 				shouldWaitForSend = true
@@ -1270,6 +1274,7 @@ func (sess *Session) writeMessageAsync(
 		if !shouldWaitForSend {
 			return
 		}
+		sess.debugf("wait for previous messages to be sent")
 
 		sendToSendDelayedNowChan := func() (result bool) {
 			defer func() {
@@ -1400,6 +1405,7 @@ func (sess *Session) appendToDelayedWriteBuffer(
 
 		buf.MetadataVariableUInt++
 	})
+	sess.debugf("appendToDelayedWriteBuffer() -> %+v", sendInfo)
 	return
 }
 
@@ -1448,6 +1454,7 @@ func (sess *Session) sendDelayedNow(
 	callSend := func() {
 		if len(buf.Bytes) > 0 {
 			oldSendInfo.N, oldSendInfo.Err = sess.sendDelayedNowSyncFromBuffer(buf)
+			sess.debugf("oldSendInfo -> %+v", oldSendInfo)
 		}
 		close(oldSendInfo.c)
 		oldSendInfo.Release()
@@ -1662,14 +1669,6 @@ func (sess *Session) sendMessages(
 	return n, err
 }
 
-func (sess *Session) ifDebug(fn func()) {
-	if !sess.options.EnableDebug {
-		return
-	}
-
-	fn()
-}
-
 func (sess *Session) ifInfo(fn func()) {
 	if !sess.options.EnableDebug {
 		return
@@ -1678,21 +1677,11 @@ func (sess *Session) ifInfo(fn func()) {
 	fn()
 }
 
-func (sess *Session) debugf(format string, args ...interface{}) {
-	sess.ifDebug(func() {
-		defer func() { recover() }()
-		select {
-		case sess.debugOutputChan <- DebugOutputEntry{Format: format, Args: deepcopy.Copy(args).([]interface{})}:
-		default:
-		}
-	})
-}
-
 func (sess *Session) infof(format string, args ...interface{}) {
 	sess.ifInfo(func() {
 		defer func() { recover() }()
 		select {
-		case sess.infoOutputChan <- DebugOutputEntry{Format: format, Args: deepcopy.Copy(args).([]interface{})}:
+		case sess.infoOutputChan <- DebugOutputEntry{Format: format, Args: copyForDebug(args...)}:
 		default:
 		}
 	})

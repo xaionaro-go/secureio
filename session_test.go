@@ -484,6 +484,37 @@ func TestSessionID_Bytes(t *testing.T) {
 	assert.Equal(t, id, idCmp)
 }
 
+func TestSession_WriteMessageAsync_sendNow(t *testing.T) {
+	ctx := context.Background()
+
+	identity0, identity1, conn0, conn1 := testPair(t)
+
+	opts := &SessionOptions{
+		OnInitFuncs: []OnInitFunc{func(sess *Session) {
+			printLogsOfSession(t, true, sess)
+		}},
+		EnableDebug: true,
+	}
+
+	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
+	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{t, nil}, opts)
+
+	sess0.WaitForState(ctx, SessionStateEstablished)
+	sess1.WaitForState(ctx, SessionStateEstablished)
+
+	sendInfo := sess0.WriteMessageAsync(MessageTypeReadWrite, []byte{1})
+	sendInfo.SendNowAndWait()
+	assert.NotZero(t, sendInfo.N, sendInfo.SendID())
+	select {
+	case <-sendInfo.Done():
+	default:
+		assert.Fail(t, "sendInfo is not finished")
+	}
+	assert.NoError(t, sendInfo.Err)
+	_ = sess0.CloseAndWait()
+	_ = sess1.CloseAndWait()
+}
+
 func TestSession_uncovered(t *testing.T) {
 	ctx := context.Background()
 	identity0, identity1, _, _ := testPair(t)

@@ -13,15 +13,16 @@ type SendInfo struct {
 	// Err contains the resulting error
 	Err error
 
-	// N contains the number of bytes were written. Always equals to the
-	// len of the message if Err == nil.
+	// N contains the number of bytes were written to send the merged
+	// messaged through the backend.
 	N int
 
 	sendID   uint64 // for debug only
 	c        chan struct{}
 	ctx      context.Context
-	refCount int32
+	refCount int64
 	isBusy   bool
+	sess     *Session
 	pool     *sendInfoPool
 }
 
@@ -33,7 +34,7 @@ type sendInfoPool struct {
 	storage sync.Pool
 }
 
-func newSendInfoPool() *sendInfoPool {
+func newSendInfoPool(sess *Session) *sendInfoPool {
 	pool := &sendInfoPool{}
 	pool.storage = sync.Pool{
 		New: func() interface{} {
@@ -41,6 +42,7 @@ func newSendInfoPool() *sendInfoPool {
 				c:      make(chan struct{}),
 				sendID: atomic.AddUint64(&nextSendID, 1),
 
+				sess: sess,
 				pool: pool,
 			}
 		},
@@ -90,8 +92,12 @@ func (sendInfo *SendInfo) reset() {
 	sendInfo.N = 0
 }
 
-func (sendInfo *SendInfo) incRefCount() int32 {
-	return atomic.AddInt32(&sendInfo.refCount, 1)
+func (sendInfo *SendInfo) incRefCount() int64 {
+	return atomic.AddInt64(&sendInfo.refCount, 1)
+}
+
+func (sendInfo SendInfo) duplicate() interface{} {
+	return &sendInfo
 }
 
 // Release just puts the `*SendInfo` back to the memory pool
@@ -105,7 +111,7 @@ func (sendInfo *SendInfo) Release() {
 	default:
 		panic("Release() was called on a non-finished sendInfo")
 	}
-	refCount := atomic.AddInt32(&sendInfo.refCount, -1)
+	refCount := atomic.AddInt64(&sendInfo.refCount, -1)
 	if refCount > 0 {
 		return
 	}
@@ -118,7 +124,17 @@ func (sendInfo *SendInfo) Release() {
 
 func (sendInfo *SendInfo) String() string {
 	return fmt.Sprintf("{c: %v; Err: %v: N: %v: sendID: %v, refCount: %v}",
-		sendInfo.c, sendInfo.Err, sendInfo.N, sendInfo.sendID, atomic.LoadInt32(&sendInfo.refCount))
+		sendInfo.c, sendInfo.Err, sendInfo.N, sendInfo.sendID, atomic.LoadInt64(&sendInfo.refCount))
+}
+
+// SendNowAndWait belays the rest part of the send delay of the remaining send iteration
+// and forces to send the data ASAP and wait until it will be done.
+func (sendInfo *SendInfo) SendNowAndWait() {
+	if sendInfo.incRefCount() == 1 {
+		panic("should not happen")
+	}
+	sendInfo.sess.sendDelayedNowChan <- sendInfo
+	sendInfo.Wait()
 }
 
 // Wait waits until message is send or until the context is cancelled

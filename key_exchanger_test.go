@@ -27,7 +27,6 @@ func testKeyExchanger(t *testing.T, errFunc func(error)) *keyExchanger {
 			backend:                      newErroneousConn(),
 			state:                        newSessionStateStorage(),
 			cipherKeys:                   &[][][]byte{nil}[0],
-			sendInfoPool:                 newSendInfoPool(),
 			messageHeadersPool:           newMessageHeadersPool(),
 			messagesContainerHeadersPool: newMessagesContainerHeadersPool(),
 			bufferPool:                   newBufferPool(1),
@@ -40,7 +39,9 @@ func testKeyExchanger(t *testing.T, errFunc func(error)) *keyExchanger {
 		localIdentity:  testIdentity(t),
 		remoteIdentity: testIdentity(t),
 	}
-	kx.messenger.sess.setSecrets([][]byte{make([]byte, 32), make([]byte, 32), make([]byte, 32), make([]byte, 32)})
+	sess := kx.messenger.sess
+	sess.sendInfoPool = newSendInfoPool(sess)
+	sess.setSecrets([][]byte{make([]byte, 32), make([]byte, 32), make([]byte, 32), make([]byte, 32)})
 	return kx
 }
 
