@@ -96,6 +96,7 @@ type Session struct {
 	ReadChan             [MessageTypeMax]chan *readItem
 	currentSecrets       [][]byte
 	cipherKeys           *[][]byte
+	auxCipherKey         []byte
 	waitForCipherKeyChan chan struct{}
 	eventHandler         EventHandler
 	stopWaitGroup        sync.WaitGroup
@@ -332,7 +333,6 @@ func newSession(
 		waitForCipherKeyChan: make(chan struct{}),
 		sendDelayedNowChan:   make(chan *SendInfo),
 		cipherKeys:           &[][][]byte{nil}[0],
-		nextPacketID:         uint64(timeNow().UnixNano()),
 	}
 
 	sess.ctx, sess.cancelFunc = context.WithCancel(ctx)
@@ -387,8 +387,19 @@ func newSession(
 		sess.ReadChan[i] = make(chan *readItem, messageQueueLength)
 	}
 
+	psk := sess.options.KeyExchangerOptions.PSK
+	if psk != nil {
+		sess.auxCipherKey = hash(psk, Salt, []byte("auxCipherKey"))[:chacha.KeySize]
+	}
+
 	panicIf(sess.init())
 	return sess
+}
+
+func (sess *Session) getNextPacketID() uint64 {
+	result := atomic.AddUint64(&sess.nextPacketID, 1)
+	sess.debugf("next packet ID is %v", result)
+	return result
 }
 
 // GetMaxPayloadSize returns the currently configured MaxPayLoadSize
@@ -603,9 +614,14 @@ func (sess *Session) resetReadDeadline() (err error) {
 
 func (sess *Session) readerLoop() {
 	defer func() {
-		sess.debugf("/readerLoop: %v %v", sess.state.Load(), sess.isDoneSlow())
+		sess.debugf("/readerLoop: state:%v isDoneSlow:%v", sess.state.Load(), sess.isDoneSlow())
 
-		sess.startClosing()
+		if sess.state.Load() != SessionStateKeyExchanging {
+			sess.startClosing()
+		} else {
+			sess.setState(SessionStateClosing, SessionStateClosed)
+			sess.cancelFunc()
+		}
 
 		for _, messenger := range sess.messenger {
 			if messenger == nil {
@@ -628,6 +644,7 @@ func (sess *Session) readerLoop() {
 		close(sess.debugOutputChan)
 		close(sess.infoOutputChan)
 		_ = sess.resetReadDeadline()
+		sess.debugf("//readerLoop: %v %v", sess.state.Load(), sess.isDoneSlow())
 	}()
 
 	var inputBuffer = make([]byte, sess.GetMaxPacketSize())
@@ -645,6 +662,7 @@ func (sess *Session) readerLoop() {
 		})
 		if err != nil {
 			if sess.isDone() {
+				sess.debugf("readerLoop(): isDone()")
 				return
 			}
 			if strings.Index(err.Error(), `i/o timeout`) != -1 { // TODO: find a more strict way to check this error
@@ -681,11 +699,13 @@ func (sess *Session) readerLoop() {
 
 		containerHdr, messagesBytes, err := sess.decrypt(&decryptedBuffer, inputBuffer[:n])
 		sess.ifDebug(func() {
-			if len(messagesBytes) > 200 {
+			debugOutBytes := messagesBytes
+			if len(debugOutBytes) > 200 {
+				debugOutBytes = nil
 				return
 			}
 			sess.debugf("sess.decrypt() result: %v %v %v",
-				containerHdr, messagesBytes, err,
+				containerHdr, debugOutBytes, err,
 			)
 		})
 
@@ -720,6 +740,7 @@ func (sess *Session) readerLoop() {
 		sess.processIncomingMessages(containerHdr, messagesBytes)
 		containerHdr.Release()
 	}
+	sess.debugf(`readerLoop(): loop finished`)
 }
 
 func (sess *Session) processIncomingMessages(
@@ -817,8 +838,19 @@ func (sess *Session) decrypt(
 
 	containerHdr = sess.messagesContainerHeadersPool.AcquireMessagesContainerHeaders(sess)
 
-	// copying the IV (it's not encrypted)
-	_, err = containerHdr.PacketID.Read(encrypted)
+	// Getting PacketID
+
+	var packetIDBytes []byte
+	if sess.auxCipherKey == nil {
+		packetIDBytes = encrypted[:len(containerHdr.PacketID)]
+	} else {
+		packetIDBytes = decrypted.Bytes[:len(containerHdr.PacketID)]
+		decrypt(sess.auxCipherKey, sess.identity.Keys.Public[:ivSize], packetIDBytes, encrypted[:len(containerHdr.PacketID)])
+		decrypted.Offset += uint(len(containerHdr.PacketID))
+		sess.debugf("decrypted the PacketID from %v to %v using key %v", encrypted[:len(containerHdr.PacketID)], packetIDBytes, sess.auxCipherKey)
+	}
+
+	_, err = containerHdr.PacketID.Read(packetIDBytes)
 	if err != nil {
 		err = wrapError(err)
 		return
@@ -831,29 +863,31 @@ func (sess *Session) decrypt(
 	defer ivBuf.Release()
 	if sess.remoteSessionID != nil {
 		sessionIDBytes := sess.remoteSessionID.Bytes()
-		ivBuf.Grow(uint(len(sessionIDBytes) + len(containerHdr.PacketID)))
+		ivLen := len(sessionIDBytes) + len(containerHdr.PacketID)
+		ivBuf.Grow(uint(ivLen))
 		copy(ivBuf.Bytes, sessionIDBytes[:])
 		copy(ivBuf.Bytes[len(sessionIDBytes):], containerHdr.PacketID[:])
+		sess.debugf("decrypt(): iv: %v:%v", ivLen, ivBuf.Bytes[:ivLen])
 	}
 
-	tryDecrypt := func(cipherKey []byte) (bool, error) {
+	tryDecrypt := func(cipherKey []byte, iv []byte) (bool, error) {
 		decrypted.Reset()
 		decrypted.Grow(uint(len(encrypted)))
 
 		if cipherKey != nil {
-			decrypt(cipherKey, ivBuf.Bytes, decrypted.Bytes, encrypted)
+			decrypt(cipherKey, iv, decrypted.Bytes[decrypted.Offset:], encrypted)
 
 			if len(encrypted) < 200 {
 				sess.ifDebug(func() {
 					sess.debugf("decrypted: iv:%v dec:%v enc:%v dec_len:%v cipher_key:%v",
-						([8]byte)(containerHdr.PacketID), decrypted.Bytes, encrypted, decrypted.Len(), cipherKey)
+						iv, decrypted.Bytes[decrypted.Offset:], encrypted, decrypted.Len(), cipherKey)
 				})
 			}
 		} else {
-			copy(decrypted.Bytes, encrypted)
+			copy(decrypted.Bytes[decrypted.Offset:], encrypted)
 		}
 
-		n, err := containerHdr.ReadAfterIV(decrypted.Bytes)
+		n, err := containerHdr.ReadAfterIV(decrypted.Bytes[decrypted.Offset:])
 		if n >= 0 {
 			decrypted.Offset += uint(n)
 		}
@@ -887,12 +921,12 @@ func (sess *Session) decrypt(
 			if cipherKey == nil {
 				continue
 			}
-			if done, err = tryDecrypt(cipherKey); done || err != nil {
+			if done, err = tryDecrypt(cipherKey, ivBuf.Bytes); done || err != nil {
 				return
 			}
 		}
 
-		if done, err = tryDecrypt(nil); done || err != nil {
+		if done, err = tryDecrypt(sess.auxCipherKey, containerHdr.PacketID[:]); done || err != nil {
 			return
 		}
 	}
@@ -1080,19 +1114,11 @@ func (sess *Session) WriteMessageAsync(
 	hdr.Set(msgType, payload)
 	defer hdr.Release()
 
-	if msgType == messageTypeKeyExchange || sess.options.SendDelay == nil {
-		var cipherKey []byte
+	hdr.SetIsConfidential(msgType != messageTypeKeyExchange)
+
+	if !hdr.IsConfidential() || sess.options.SendDelay == nil {
 		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
-		if msgType != messageTypeKeyExchange {
-			cipherKeys := sess.GetCipherKeysWait()
-			if cipherKeys == nil {
-				sendInfo.Err = newErrCanceled()
-				close(sendInfo.c)
-				return
-			}
-			cipherKey = cipherKeys[secretIDRecentBoth]
-		}
-		n, err := sess.writeMessageSync(cipherKey, hdr, payload)
+		n, err := sess.writeMessageSync(hdr, payload)
 		sendInfo.N = n
 		sendInfo.Err = err
 		close(sendInfo.c)
@@ -1103,7 +1129,6 @@ func (sess *Session) WriteMessageAsync(
 }
 
 func (sess *Session) writeMessageSync(
-	cipherKey []byte,
 	hdr *messageHeaders,
 	payload []byte,
 ) (n int, err error) {
@@ -1124,16 +1149,8 @@ func (sess *Session) writeMessageSync(
 
 	copy(buf.Bytes[messageHeadersSize:], payload)
 
-	containerHdr := sess.messagesContainerHeadersPool.AcquireMessagesContainerHeaders(sess)
-	err = containerHdr.Set(cipherKey, buf.Bytes)
-	if err != nil {
-		return -1, wrapError(err)
-	}
-	defer containerHdr.Release()
-
 	return sess.sendMessages(
-		cipherKey,
-		containerHdr,
+		hdr.IsConfidential(),
 		buf.Bytes,
 	)
 }
@@ -1153,15 +1170,7 @@ func (sess *Session) writeMessageAsync(
 
 	if sess.options.SendDelay == nil {
 		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
-		var cipherKey []byte
-		cipherKeys := sess.GetCipherKeysWait()
-		if cipherKeys == nil {
-			sendInfo.Err = newErrCanceled()
-			close(sendInfo.c)
-			return
-		}
-		cipherKey = cipherKeys[secretIDRecentBoth]
-		sendInfo.N, sendInfo.Err = sess.writeMessageSync(cipherKey, hdr, payload)
+		sendInfo.N, sendInfo.Err = sess.writeMessageSync(hdr, payload)
 		close(sendInfo.c)
 		return
 	}
@@ -1388,22 +1397,8 @@ func (sess *Session) sendDelayedNow(
 func (sess *Session) sendDelayedNowSyncFromBuffer(buf *buffer) (int, error) {
 	messagesBytes := buf.Bytes
 
-	cipherKeys := sess.GetCipherKeysWait()
-	if cipherKeys == nil {
-		return 0, newErrCanceled()
-	}
-	cipherKey := cipherKeys[secretIDRecentBoth]
-
-	containerHdr := sess.messagesContainerHeadersPool.AcquireMessagesContainerHeaders(sess)
-	err := containerHdr.Set(cipherKey, messagesBytes)
-	if err != nil {
-		return -1, wrapError(err)
-	}
-	defer containerHdr.Release()
-
 	n, err := sess.sendMessages(
-		cipherKey,
-		containerHdr,
+		true,
 		messagesBytes,
 	)
 	if err != nil {
@@ -1473,15 +1468,39 @@ func (sess *Session) delayedSenderLoop() {
 }
 
 func (sess *Session) sendMessages(
-	cipherKey []byte,
-	containerHdr *messagesContainerHeaders,
+	isConfidential bool,
 	messagesBytes []byte,
 ) (int, error) {
+
+	// cipherKey
+
+	var cipherKey []byte
+	if isConfidential {
+		cipherKeys := sess.GetCipherKeysWait()
+		if cipherKeys == nil {
+			return 0, newErrCanceled()
+		}
+		cipherKey = cipherKeys[secretIDRecentBoth]
+	} else {
+		cipherKey = sess.auxCipherKey
+	}
+
+	// containerHdr
+
+	containerHdr := sess.messagesContainerHeadersPool.AcquireMessagesContainerHeaders(sess)
+	err := containerHdr.Set(cipherKey, messagesBytes)
+	if err != nil {
+		return -1, wrapError(err)
+	}
+	defer containerHdr.Release()
+
+	// plaintext buffer
+
 	buf := sess.bufferPool.AcquireBuffer()
 	defer buf.Release()
 	buf.Grow(messagesContainerHeadersSize + uint(len(messagesBytes)))
 
-	_, err := containerHdr.Write(buf.Bytes)
+	_, err = containerHdr.Write(buf.Bytes)
 	if err != nil {
 		return 0, wrapError(err)
 	}
@@ -1494,17 +1513,15 @@ func (sess *Session) sendMessages(
 		return 0, err
 	}
 
-	if sess.isDone() {
-		return 0, newErrAlreadyClosed()
-	}
-
 	sess.ifDebug(func() {
 		sess.debugf("containerHdr == %+v; cipherKey == %v",
 			&containerHdr.messagesContainerHeadersData, cipherKey)
 	})
 
+	// encrypt
+
 	var outBytes []byte
-	if !containerHdr.IsEncrypted() {
+	if cipherKey == nil {
 		outBytes = buf.Bytes
 	} else {
 		encrypted := sess.bufferPool.AcquireBuffer()
@@ -1519,14 +1536,23 @@ func (sess *Session) sendMessages(
 		ivBuf := sess.bufferPool.AcquireBuffer()
 		defer ivBuf.Release()
 
-		sessionIDBytes := sess.id.Bytes()
-		ivBuf.Grow(uint(len(sessionIDBytes) + len(containerHdr.PacketID)))
-		copy(ivBuf.Bytes, sessionIDBytes[:])
-		copy(ivBuf.Bytes[len(sessionIDBytes):], containerHdr.PacketID[:])
+		if isConfidential {
+			sessionIDBytes := sess.id.Bytes()
+			ivBuf.Grow(uint(len(sessionIDBytes) + len(containerHdr.PacketID)))
+			copy(ivBuf.Bytes, sessionIDBytes[:])
+			copy(ivBuf.Bytes[len(sessionIDBytes):], containerHdr.PacketID[:])
+		} else {
+			ivBuf.Grow(uint(len(containerHdr.PacketID)))
+			copy(ivBuf.Bytes, containerHdr.PacketID[:])
+		}
 
 		encryptedBytes := encrypted.Bytes[:size]
 		encrypt(cipherKey, ivBuf.Bytes, encryptedBytes[len(containerHdr.PacketID):], plainBytes[len(containerHdr.PacketID):])
-		copy(encryptedBytes[:len(containerHdr.PacketID)], containerHdr.PacketID[:]) // copying the plain IV
+		if sess.auxCipherKey == nil {
+			copy(encryptedBytes[:len(containerHdr.PacketID)], containerHdr.PacketID[:]) // copying the plain IV
+		} else {
+			encrypt(sess.auxCipherKey, sess.remoteIdentity.Keys.Public[:ivSize], encryptedBytes[:len(containerHdr.PacketID)], containerHdr.PacketID[:])
+		}
 		sess.ifDebug(func() {
 			if len(encryptedBytes) >= 200 {
 				return
@@ -1537,6 +1563,12 @@ func (sess *Session) sendMessages(
 		outBytes = encryptedBytes
 	}
 
+	// send/write
+
+	if sess.isDone() {
+		return 0, newErrAlreadyClosed()
+	}
+
 	n, err = sess.backend.Write(outBytes)
 	sess.ifDebug(func() {
 		outBytesPrint := interface{}("<too long>")
@@ -1545,13 +1577,13 @@ func (sess *Session) sendMessages(
 		}
 
 		tContainerHdr := &messagesContainerHeadersData{}
-		if !containerHdr.IsEncrypted() {
+		if cipherKey == nil {
 			_, _ = tContainerHdr.Read(outBytes)
 		} else {
 			tContainerHdr = nil
 		}
 
-		sess.debugf("sess.backend.Write(%v enc:%v[parsed_hdr:%+v]) -> %v, %v", outBytesPrint, containerHdr.IsEncrypted(), tContainerHdr, n, err)
+		sess.debugf("sess.backend.Write(%v enc:%v[parsed_hdr:%+v]) -> %v, %v", outBytesPrint, cipherKey != nil, tContainerHdr, n, err)
 	})
 
 	if err != nil {

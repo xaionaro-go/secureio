@@ -49,7 +49,7 @@ var (
 
 // MessageType is the identifier of the type of the message.
 // It is used to determine how to interpret the message (which Handler to use).
-type MessageType uint8
+type MessageType uint32
 
 const (
 	messageTypeUndefined = iota
@@ -131,10 +131,9 @@ func (t MessageType) String() string {
 type messageLength uint32
 
 type messageHeadersData struct {
-	Type      MessageType
-	Reserved0 uint8
-	Reserved1 uint16
-	Length    messageLength
+	Type   MessageType
+	Length messageLength
+	messageFlags
 }
 
 type messageHeaders struct {
@@ -144,20 +143,20 @@ type messageHeaders struct {
 	isBusy bool
 }
 
-type messagesContainerFlags uint8
+type messageFlags uint8
 
 const (
-	messagesContainerFlagsIsEncrypted = messagesContainerFlags(1 << iota)
+	messageFlagsIsConfidential = messageFlags(1 << iota)
 )
 
-func (flags messagesContainerFlags) IsEncrypted() bool {
-	return flags&messagesContainerFlagsIsEncrypted != 0
+func (flags messageFlags) IsConfidential() bool {
+	return flags&messageFlagsIsConfidential != 0
 }
-func (flags *messagesContainerFlags) SetIsEncrypted(newValue bool) {
+func (flags *messageFlags) SetIsConfidential(newValue bool) {
 	if newValue {
-		*flags |= messagesContainerFlagsIsEncrypted
+		*flags |= messageFlagsIsConfidential
 	} else {
-		*flags &= ^messagesContainerFlagsIsEncrypted
+		*flags &= ^messageFlagsIsConfidential
 	}
 }
 
@@ -173,7 +172,7 @@ func (id *packetID) String() string {
 	return fmt.Sprint(id.Value())
 }
 func (id *packetID) SetNextPacketID(sess *Session) {
-	binaryOrderType.PutUint64((*id)[:], atomic.AddUint64(&sess.nextPacketID, 1))
+	binaryOrderType.PutUint64((*id)[:], sess.getNextPacketID())
 }
 func (id *packetID) Read(b []byte) (int, error) {
 	if len(b) < len(*id) {
@@ -196,9 +195,6 @@ type messagesContainerHeadersData struct {
 	ContainerHeadersChecksum [poly1305.TagSize]byte
 	MessagesChecksum         [poly1305.TagSize]byte
 	Length                   messageLength
-	messagesContainerFlags
-	Reserved0 uint8
-	Reserved1 uint16
 }
 
 type messagesContainerHeaders struct {
@@ -215,8 +211,8 @@ var (
 
 func (hdr *messageHeadersData) Reset() {
 	hdr.Type = messageTypeUndefined
-	hdr.Reserved0 = 0
 	hdr.Length = 0
+	hdr.messageFlags = 0
 }
 
 type messageHeadersPool struct {
@@ -265,8 +261,12 @@ func (hdr *messageHeadersData) Read(b []byte) (int, error) {
 	if uint(len(b)) < messageHeadersSize {
 		return 0, newErrTooShort(messageHeadersSize, uint(len(b)))
 	}
-	hdr.Type = MessageType(b[0])
-	hdr.Length = messageLength(binaryOrderType.Uint32(b[4:]))
+	hdr.Type = MessageType(binaryOrderType.Uint32(b[0:]))
+	b = b[4:]
+	hdr.Length = messageLength(binaryOrderType.Uint32(b[0:]))
+	b = b[4:]
+	hdr.messageFlags = messageFlags(b[0])
+	b = b[1:]
 
 	return int(messageHeadersSize), nil
 }
@@ -276,8 +276,12 @@ func (hdr *messageHeadersData) Write(b []byte) (int, error) {
 		return 0, newErrTooShort(messageHeadersSize, uint(len(b)))
 	}
 
-	b[0] = uint8(hdr.Type)
-	binaryOrderType.PutUint32(b[4:], uint32(hdr.Length))
+	binaryOrderType.PutUint32(b[0:], uint32(hdr.Type))
+	b = b[4:]
+	binaryOrderType.PutUint32(b[0:], uint32(hdr.Length))
+	b = b[4:]
+	b[0] = uint8(hdr.messageFlags)
+	b = b[1:]
 
 	return int(messageHeadersSize), nil
 }
@@ -338,12 +342,6 @@ func (containerHdr *messagesContainerHeadersData) ReadAfterIV(b []byte) (int, er
 	b = b[poly1305.TagSize:]
 	containerHdr.Length = messageLength(binaryOrderType.Uint32(b))
 	b = b[4:]
-	containerHdr.messagesContainerFlags = messagesContainerFlags(b[0])
-	b = b[1:]
-	containerHdr.Reserved0 = b[0]
-	b = b[1:]
-	containerHdr.Reserved1 = binaryOrderType.Uint16(b)
-	b = b[2:]
 
 	return int(messagesContainerHeadersSize) - len(containerHdr.PacketID), nil
 }
@@ -364,12 +362,6 @@ func (containerHdr *messagesContainerHeadersData) Write(b []byte) (int, error) {
 	b = b[poly1305.TagSize:]
 	binaryOrderType.PutUint32(b, uint32(containerHdr.Length))
 	b = b[4:]
-	b[0] = uint8(containerHdr.messagesContainerFlags)
-	b = b[1:]
-	b[0] = containerHdr.Reserved0
-	b = b[1:]
-	binaryOrderType.PutUint16(b, containerHdr.Reserved1)
-	b = b[2:]
 
 	return int(messagesContainerHeadersSize), nil
 }
@@ -433,7 +425,6 @@ func (pool *messagesContainerHeadersPool) Put(containerHdr *messagesContainerHea
 }
 
 func (containerHdr *messagesContainerHeadersData) Set(cipherKey []byte, messagesBytes []byte) error {
-	containerHdr.SetIsEncrypted(cipherKey != nil)
 	containerHdr.Length = messageLength(len(messagesBytes))
 	containerHdr.CalculateHeadersChecksumTo(cipherKey, &containerHdr.ContainerHeadersChecksum)
 	containerHdr.CalculateMessagesChecksumTo(cipherKey, &containerHdr.MessagesChecksum, messagesBytes)
@@ -444,9 +435,6 @@ func (containerHdr *messagesContainerHeadersData) Reset() {
 	containerHdr.Length = 0
 	slice.SetZeros(containerHdr.ContainerHeadersChecksum[:])
 	slice.SetZeros(containerHdr.MessagesChecksum[:])
-	containerHdr.messagesContainerFlags = 0
-	containerHdr.Reserved0 = 0
-	containerHdr.Reserved1 = 0
 }
 
 func (containerHdr *messagesContainerHeaders) Release() {

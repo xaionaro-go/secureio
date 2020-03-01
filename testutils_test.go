@@ -55,7 +55,7 @@ var testPairMutex sync.Mutex
 
 var enableTestLoggers bool
 
-func printLogsOfSession(t *testing.T, enableInfo bool, sess *Session) {
+func printLogsOfSession(t *testing.T, infoAsError bool, sess *Session) {
 	if enableTestLoggers {
 		fmt.Println("runned loggers")
 	}
@@ -87,7 +87,7 @@ func printLogsOfSession(t *testing.T, enableInfo bool, sess *Session) {
 				if !ok {
 					return
 				}
-				if !enableInfo {
+				if !infoAsError {
 					if !enableTestLoggers {
 						return
 					}

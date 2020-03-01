@@ -3,6 +3,7 @@ package secureio
 import (
 	"errors"
 	"math/rand"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,8 +49,9 @@ func TestSession_checkMessagesChecksum_negative(t *testing.T) {
 func TestSessionIDGetterType_Get(t *testing.T) {
 	id0 := globalSessionIDGetter.Get()
 	id1 := globalSessionIDGetter.Get()
+	timeNowNSec := int64(987654321)
 	timeNow = func() time.Time {
-		return time.Unix(0, 0)
+		return time.Unix(123456789, atomic.AddInt64(&timeNowNSec, 1))
 	}
 	assert.NotEqual(t, SessionID{}, id0)
 	assert.NotEqual(t, id0, id1)

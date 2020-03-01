@@ -523,10 +523,10 @@ func TestSession_uncovered(t *testing.T) {
 	}()
 	runtime.Gosched()
 	close(*unsafetools.FieldByName(sess0, `waitForCipherKeyChan`).(*chan struct{}))
+	wg.Wait()
 	runtime.Gosched()
 	conn.SetError(errors.New("unit-test"))
 	runtime.Gosched()
-	wg.Wait()
 	*unsafetools.FieldByName(sess0, `isReadingValue`).(*uint64) = 1
 	_ = sess0.CloseAndWait()
 }

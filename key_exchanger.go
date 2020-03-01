@@ -14,7 +14,6 @@ import (
 
 	"github.com/aead/ecdh"
 	"github.com/xaionaro-go/bytesextra"
-	"golang.org/x/crypto/sha3"
 
 	xerrors "github.com/xaionaro-go/errors"
 )
@@ -270,13 +269,10 @@ func (kx *keyExchanger) generateSharedKey(
 	}
 
 	psk := kx.options.PSK
-	if len(psk) > 0 {
-		pskWithSalt := make([]byte, 0, len(psk)+len(Salt))
-		pskWithSalt = append(pskWithSalt, psk...)
-		pskWithSalt = append(pskWithSalt, Salt...)
-		pskHash := sha3.Sum256(pskWithSalt)
-		for i := 0; i < len(pskHash); i++ {
-			key[i] ^= pskHash[i]
+	if psk != nil {
+		pskXORer := hash(psk, Salt, []byte("cipherKey"))
+		for i := 0; i < len(pskXORer); i++ {
+			key[i] ^= pskXORer[i]
 		}
 	}
 

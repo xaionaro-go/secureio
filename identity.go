@@ -288,6 +288,7 @@ func (i *Identity) MutualConfirmationOfIdentity(
 	// Detach from `backend` right after the first authentication message.
 	opts.DetachOnSequentialDecryptFailsCount = 1
 	opts.DetachOnMessagesCount = 1
+	opts.KeyExchangerOptions.AnswersMode = KeyExchangeAnswersModeAnswerAndWait
 
 	sess := newSession(
 		ctx,
