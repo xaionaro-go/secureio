@@ -41,7 +41,7 @@ _, err := session.Read(someData)
 
 Setup the receiver:
 ```go
-session.SetHandlerFuncs(secureio.MessageTypeDataPacketType3, func(payload []byte) {
+session.SetHandlerFuncs(secureio.MessageTypeChannel(0), func(payload []byte) {
     fmt.Println("I received a payload:", payload)
 }, func(err error) {
     panic(err)
@@ -52,7 +52,7 @@ session.SetHandlerFuncs(secureio.MessageTypeDataPacketType3, func(payload []byte
 
 Send a message synchronously:
 ```go
-_, err := session.WriteMessage(secureio.MessageTypeDataPacketType3, payload)
+_, err := session.WriteMessage(secureio.MessageTypeChannel(0), payload)
 ```
 
 **OR**
@@ -60,7 +60,7 @@ _, err := session.WriteMessage(secureio.MessageTypeDataPacketType3, payload)
 Send a message asynchronously:
 ```go
 // Schedule the sending of the payload
-sendInfo := session.WriteMessageAsync(secureio.MessageTypeDataPacketType3, payload)
+sendInfo := session.WriteMessageAsync(secureio.MessageTypeChannel(0), payload)
 
 [.. your another stuff here if you want ..]
 
@@ -76,16 +76,15 @@ err := sendInfo.Err
 
 #### MessageTypes
 
-```go
-MessageTypeDataPacketType0
-MessageTypeDataPacketType1
-MessageTypeDataPacketType2
-MessageTypeDataPacketType3
-...
-MessageTypeDataPacketType15
-```
-The `MessageTypeDataPacketType0` is used for default `Read()`/`Write()`.
-Use any :)
+
+A MessageType for a custom channel may be created via function
+`MessageTypeChannel(channelID uint32)`. `channelID` is a custom number to identify
+which flow is it (to connect a sender with appropriate receiver on the remote side).
+In the examples above it was used `0` as the `channelID` value, but it could be any
+value in the range: `0 <= x <= 2**31`.
+
+Also there's a special MessageType `MessageTypeReadWrite` is used for
+default `Read()`/`Write()`. But you may redirect this flow to a custom handler.
 
 ## Benchmark
 
@@ -168,7 +167,6 @@ is just ignored.
 
 # TODO
 
-* allow use all message types
 * add an unit-test for key renew
 * implement `(*sendInfo).SendNow()`
 * implement smart lockers

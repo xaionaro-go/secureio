@@ -52,69 +52,38 @@ var (
 type MessageType uint32
 
 const (
-	messageTypeUndefined = iota
-	messageTypeKeyExchange
+	messageTypeUndefined   = MessageType(0)
+	messageTypeKeyExchange = MessageType(^uint32(0) - iota)
 
-	// MessageTypeDataPacketType0 is the default MessageType for
+	// MessageTypeReadWrite is the default MessageType for
 	// the in-band data. It used by default for (*Session).Read and
 	// (*Session).Write.
-	MessageTypeDataPacketType0
-
-	// MessageTypeDataPacketType1 is a MessageType for a custom Handler.
-	MessageTypeDataPacketType1
-
-	// MessageTypeDataPacketType2 is a MessageType for a custom Handler.
-	MessageTypeDataPacketType2
-
-	// MessageTypeDataPacketType3 is a MessageType for a custom Handler.
-	MessageTypeDataPacketType3
-
-	// MessageTypeDataPacketType4 is a MessageType for a custom Handler.
-	MessageTypeDataPacketType4
-
-	// MessageTypeDataPacketType5 is a MessageType for a custom Handler.
-	MessageTypeDataPacketType5
-
-	// MessageTypeDataPacketType6 is a MessageType for a custom Handler.
-	MessageTypeDataPacketType6
-
-	// MessageTypeDataPacketType7 is a MessageType for a custom Handler.
-	MessageTypeDataPacketType7
-
-	// MessageTypeDataPacketType8 is a MessageType for a custom Handler.
-	MessageTypeDataPacketType8
-
-	// MessageTypeDataPacketType9 is a MessageType for a custom Handler.
-	MessageTypeDataPacketType9
-
-	// MessageTypeDataPacketType10 is a MessageType for a custom Handler.
-	MessageTypeDataPacketType10
-
-	// MessageTypeDataPacketType11 is a MessageType for a custom Handler.
-	MessageTypeDataPacketType11
-
-	// MessageTypeDataPacketType12 is a MessageType for a custom Handler.
-	MessageTypeDataPacketType12
-
-	// MessageTypeDataPacketType13 is a MessageType for a custom Handler.
-	MessageTypeDataPacketType13
-
-	// MessageTypeDataPacketType14 is a MessageType for a custom Handler.
-	MessageTypeDataPacketType14
-
-	// MessageTypeDataPacketType15 is a MessageType for a custom Handler.
-	MessageTypeDataPacketType15
-
-	// MessageTypeMax is supposed to be used as a loop limiter to
-	// iterate over all message types. For example:
-	//
-	// ```
-	// for msgType := MessageType(0); msgType < MessageTypeMax; msgType++ {
-	//     [... some code here ...]
-	// }
-	// ```
-	MessageTypeMax
+	MessageTypeReadWrite
+	messageTypeReserved0
+	messageTypeReserved1
+	messageTypeReserved2
+	messageTypeReserved3
+	messageTypeReserved4
+	messageTypeReserved5
+	messageTypeReserved7
+	messageTypeReserved8
+	messageTypeReserved9
+	messageTypeReserved10
+	messageTypeReserved11
+	messageTypeReserved12
+	messageTypeReserved13
+	messageTypeReserved14
+	messageTypeReservedAbove
 )
+
+// MessageTypeChannel returns MessageType for multiplexer.
+// See (*Session).SetHandlerFuncs.
+func MessageTypeChannel(channelID uint32) MessageType {
+	if channelID > uint32(messageTypeReservedAbove) {
+		panic("channelID is too high")
+	}
+	return MessageType(channelID)
+}
 
 func (t MessageType) String() string {
 	switch {
@@ -122,10 +91,12 @@ func (t MessageType) String() string {
 		return `undefined`
 	case t == messageTypeKeyExchange:
 		return `key_exchange`
-	case t >= MessageTypeDataPacketType0 && t <= MessageTypeDataPacketType15:
-		return fmt.Sprintf(`datatype%d`, uint8(t-MessageTypeDataPacketType0))
+	case t == MessageTypeReadWrite:
+		return fmt.Sprintf(`read_write`)
+	case t >= MessageTypeChannel(0) && t < messageTypeReservedAbove:
+		return fmt.Sprintf(`channel%d`, uint8(t-MessageTypeReadWrite))
 	}
-	return `unknown`
+	return `unknown` // should not happen
 }
 
 type messageLength uint32

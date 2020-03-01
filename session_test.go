@@ -81,7 +81,7 @@ func TestSessionWaitForSendInfo(t *testing.T) {
 	rand.Read(writeBuf)
 	readBuf := make([]byte, 8)
 
-	sendInfo := sess0.WriteMessageAsync(MessageTypeDataPacketType0, writeBuf)
+	sendInfo := sess0.WriteMessageAsync(MessageTypeReadWrite, writeBuf)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -132,7 +132,7 @@ func TestSessionAsyncWrite(t *testing.T) {
 
 			wg.Add(1)
 			go func() {
-				sendInfo := sess0.WriteMessageAsync(MessageTypeDataPacketType0, writeBuf)
+				sendInfo := sess0.WriteMessageAsync(MessageTypeReadWrite, writeBuf)
 				<-sendInfo.Done()
 				assert.NoError(t, sendInfo.Err)
 				sendInfo.Release()
@@ -289,7 +289,7 @@ func benchmarkSessionWriteRead(
 			}
 		}()
 
-		sess1.SetHandlerFuncs(MessageTypeDataPacketType0,
+		sess1.SetHandlerFuncs(MessageTypeReadWrite,
 			nil,
 			func(err error) {
 				panic(err)
@@ -308,12 +308,12 @@ func benchmarkSessionWriteRead(
 		if shouldWriteAsMessage {
 			if isSync {
 				_, err = sess0.WriteMessage(
-					MessageTypeDataPacketType0,
+					MessageTypeReadWrite,
 					writeBuf,
 				)
 			} else {
 				sendInfo = sess0.WriteMessageAsync(
-					MessageTypeDataPacketType0,
+					MessageTypeReadWrite,
 					writeBuf,
 				)
 			}

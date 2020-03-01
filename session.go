@@ -106,8 +106,8 @@ type Session struct {
 
 	keyExchanger         *keyExchanger
 	backend              io.ReadWriteCloser
-	messenger            [MessageTypeMax]*Messenger
-	ReadChan             [MessageTypeMax]chan *readItem
+	messenger            map[MessageType]*Messenger
+	ReadChan             map[MessageType]chan *readItem
 	currentSecrets       [][]byte
 	cipherKeys           *[][]byte
 	auxCipherKey         []byte
@@ -359,6 +359,8 @@ func newSession(
 		waitForCipherKeyChan: make(chan struct{}),
 		sendDelayedNowChan:   make(chan *SendInfo),
 		cipherKeys:           &[][][]byte{nil}[0],
+		messenger:            make(map[MessageType]*Messenger),
+		ReadChan:             make(map[MessageType]chan *readItem),
 	}
 
 	sess.ctx, sess.cancelFunc = context.WithCancel(ctx)
@@ -420,8 +422,8 @@ func newSession(
 
 	sess.sendDelayedCond = sync.NewCond(&sess.sendDelayedCondLocker)
 
-	for i := 0; i < MessageTypeMax; i++ {
-		sess.ReadChan[i] = make(chan *readItem, messageQueueLength)
+	for _, messageType := range []MessageType{messageTypeKeyExchange, MessageTypeReadWrite} {
+		sess.ReadChan[messageType] = make(chan *readItem, messageQueueLength)
 	}
 
 	psk := sess.options.KeyExchangerOptions.PSK
@@ -676,12 +678,12 @@ func (sess *Session) readerLoop() {
 		}
 		for idx, ch := range sess.ReadChan {
 			close(ch)
-			if idx == MessageTypeDataPacketType0 {
+			if idx == MessageTypeReadWrite {
 				// It is used in read(), so to prevent race-condition
 				// we just preserve it.
 				continue
 			}
-			sess.ReadChan[idx] = nil
+			delete(sess.ReadChan, idx)
 		}
 
 		sess.setState(SessionStateClosed)
@@ -851,6 +853,9 @@ func (sess *Session) processIncomingMessage(hdr *messageHeadersData, payload []b
 	item.Data = item.Data[0:hdr.Length]
 	copy(item.Data, payload[0:hdr.Length])
 	sess.debugf(`sent the message %v of length %v to a Messenger`, hdr, len(item.Data))
+	if sess.ReadChan[hdr.Type] == nil {
+		sess.ReadChan[hdr.Type] = make(chan *readItem, messageQueueLength)
+	}
 	sess.ReadChan[hdr.Type] <- item
 }
 
@@ -1073,6 +1078,8 @@ func (h *handlerByFuncs) HandleError(err error) {
 }
 
 // SetHandlerFuncs sets Handler functions for the specified MessageType:
+// * `msgType` should be the same on the both sides of one communication;
+// a MessageType could be received using function MessageTypeChannel().
 // * `handle` handles incoming traffic/messages.
 // * `onError` handles errors.
 func (sess *Session) SetHandlerFuncs(
@@ -1788,7 +1795,7 @@ func (sess *Session) setSecrets(newSecrets [][]byte) (result bool) {
 }
 
 func (sess *Session) read(p []byte) (int, error) {
-	ch := sess.ReadChan[MessageTypeDataPacketType0]
+	ch := sess.ReadChan[MessageTypeReadWrite]
 	item := <-ch
 	if item == nil {
 		return -1, newErrAlreadyClosed()
@@ -1808,7 +1815,7 @@ func (sess *Session) Read(p []byte) (int, error) {
 }
 
 func (sess *Session) write(raw []byte) (int, error) {
-	return sess.WriteMessage(MessageTypeDataPacketType0, raw)
+	return sess.WriteMessage(MessageTypeReadWrite, raw)
 }
 
 // Write implements io.Writer
