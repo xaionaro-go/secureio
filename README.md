@@ -29,10 +29,10 @@ session := identity.NewSession(context.Background(), remoteIdentity, conn, nil, 
 // Use it!
 
 // Write to it
-_, err := session.Write(someData)
+_, err = session.Write(someData)
 
 // Or/and read from it
-_, err := session.Read(someData)
+_, err = session.Read(someData)
 ```
 
 ## It's also a multiplexer
@@ -86,6 +86,15 @@ value in the range: `0 <= x <= 2**31`.
 Also there's a special MessageType `MessageTypeReadWrite` is used for
 default `Read()`/`Write()`. But you may redirect this flow to a custom handler.
 
+## Limitations and hints
+
+* Does not support traffic fragmentation. If it's required to make it work over UDP
+then it's required to disable the fragmentation, see [an example for UDP](https://github.com/xaionaro-go/secureio/blob/aa5c2d2bbf6a8a5f0acfd0f1c996dcfadf6671a9/testutils_linux_test.go#L20).
+* If the underlying writer cannot handle big messages then it's required to adjust
+[`SessionOptions.MaxPayloadSize`](https://github.com/xaionaro-go/secureio/blob/aa5c2d2bbf6a8a5f0acfd0f1c996dcfadf6671a9/session.go#L224).
+* If you don't have multiple writers and you don't need to aggregate messages (see below) then
+you may set `SessionOptions.SendDelay` to `&[]time.Duration{0}[0]`.
+
 ## Benchmark
 
 The benchmark was performed with communication via an UNIX-socket.
@@ -102,15 +111,14 @@ BenchmarkSessionWriteMessageAsyncRead32000-8          	   30163	     39131 ns/op
 BenchmarkSessionWriteMessageAsyncRead64000-8          	   15435	     77898 ns/op	 821.59 MB/s	     317 B/op	      10 allocs/op
 ```
 
-As you can see, if you need a high throughput then you need to use
-`WriteMessageAsync`. This package is designed to be asynchronous, so
-basically `Write` is an stupid and slow wrapper around code of
-`WriteMessageAsync`. And if you use `WriteMessageAsync` it also
-merges all your messages collected in 50 microseconds into a one,
-sends, and then splits them back. It allows to reduce amount of syscalls
-and other overheads. So to achieve like 1.86MiB/s on 1-byte messages
-you need to send a lot of them asynchronously (from each other), so they
-will be merged while sending/receiving through the backend connection.
+This package is designed to be asynchronous, so
+basically `Write` is an stupid around code of `WriteMessageAsync`.
+To get more throughput it merges all your messages collected
+in 50 microseconds into a one, sends, and then splits them back. It
+allows to reduce amount of syscalls and other overheads. So to achieve
+like 1.86MiB/s on 1-byte messages you need to send a lot of them
+asynchronously (from each other), so they will be merged while
+sending/receiving through the backend connection.
 
 Also this 800MiB/s is more about the localhost-case. And more realistic network case (if we have MTU ~= 1400) is:
 ```

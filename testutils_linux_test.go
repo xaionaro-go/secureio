@@ -4,27 +4,10 @@ package secureio_test
 
 import (
 	"net"
-	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
-
-func udpSetNoFragment(conn *net.UDPConn) (err error) {
-	var syscallConn syscall.RawConn
-	syscallConn, err = conn.SyscallConn()
-	if err != nil {
-		return
-	}
-	err2 := syscallConn.Control(func(fd uintptr) {
-		err = syscall.SetsockoptByte(int(fd), syscall.IPPROTO_IP, syscall.IP_MTU_DISCOVER, syscall.IP_PMTUDISC_DO)
-	})
-	if err != nil {
-		return
-	}
-	err = err2
-	return
-}
 
 func testUDPPair(t *testing.T) (*net.UDPConn, *net.UDPConn) {
 testUDPPairStart:
@@ -46,11 +29,6 @@ testUDPPairStart:
 	if err != nil {
 		goto testUDPPairStart // somebody already took the address
 	}
-	assert.NoError(t, err)
-
-	err = udpSetNoFragment(conn0)
-	assert.NoError(t, err)
-	err = udpSetNoFragment(conn1)
 	assert.NoError(t, err)
 
 	writeBuf := []byte("abc123")

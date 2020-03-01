@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	mathrand "math/rand"
+	"net"
 	"runtime"
 	"strings"
 	"sync"
@@ -185,7 +186,10 @@ type SessionOptions struct {
 	// It is used to merge small messages into one while sending it
 	// through the backend to reduce overheads.
 	//
-	// If it is set to a zero-value then DefaultSendDelay is used instead.
+	// If it is set to a nil-value then DefaultSendDelay is used instead.
+	//
+	// If it is set to zero (`&[]time.Duration{0}[0]`) then no delay
+	// will be performed and all messages will be sent right away.
 	SendDelay *time.Duration
 
 	// DetachOnMessagesCount is an amount of incoming messages after which
@@ -209,7 +213,7 @@ type SessionOptions struct {
 	// messages failed to be decrypted after which a Session will report
 	// and error.
 	//
-	// If it is set to a zero-value then
+	// If it is set to a nil-value then
 	// DefaultErrorOnSequentialDecryptFailsCount will be used instead.
 	ErrorOnSequentialDecryptFailsCount *uint64
 
@@ -220,7 +224,8 @@ type SessionOptions struct {
 	KeyExchangerOptions KeyExchangerOptions
 
 	// MaxPayloadSize defines the maximal size of a messages passed
-	// through the Session. The more this value is the more memory is consumed.
+	// through the Session. The more this value is the more memory is consumed
+	// and the larger payloads will be send through the underlying io.Writer.
 	MaxPayloadSize uint32
 
 	// OnInitFuncs are the function which will be called right before start
@@ -431,8 +436,21 @@ func newSession(
 		sess.auxCipherKey = hash(psk, Salt, []byte("auxCipherKey"))[:chacha.KeySize]
 	}
 
+	sess.setupBackend()
+
 	panicIf(sess.init())
 	return sess
+}
+
+func (sess *Session) setupBackend() {
+	var err error
+	switch backend := sess.backend.(type) {
+	case *net.UDPConn:
+		err = wrapError(udpSetNoFragment(backend))
+	}
+	if err != nil {
+		sess.error(err)
+	}
 }
 
 func (sess *Session) getNextPacketID() uint64 {
