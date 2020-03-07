@@ -11,11 +11,11 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-var nonExistantDir = path.Join(`/dev`, `null`, `non_existant`)
+var nonExistentDir = path.Join(`/dev`, `null`, `non_existent`)
 
 func TestSaveKeyToFile_negative(t *testing.T) {
 	// invalid file path
-	assert.Error(t, saveKeyToPemFile(``, nil, nonExistantDir, nil))
+	assert.Error(t, saveKeyToPemFile(``, nil, nonExistentDir, nil))
 
 	// invalid key
 	assert.Error(t, saveKeyToPemFile(``, nil, `/dev/zero`, map[string]string{":": ":"}))
@@ -35,7 +35,7 @@ func TestIdentity_generateAndSaveKeys_negative(t *testing.T) {
 	identity := testIdentity(t)
 
 	// invalid dir
-	assert.Error(t, identity.generateAndSaveKeys(nonExistantDir))
+	assert.Error(t, identity.generateAndSaveKeys(nonExistentDir))
 
 	// invalid reader
 	identity.cryptoRandReader = &bytes.Buffer{}
@@ -65,7 +65,7 @@ func TestLoadPrivateKeyFromFile_negative(t *testing.T) {
 	key := make(ed25519.PublicKey, ed25519.PublicKeySize)
 
 	// invalid path
-	assert.Error(t, loadPublicKeyFromFile(&key, nonExistantDir))
+	assert.Error(t, loadPublicKeyFromFile(&key, nonExistentDir))
 
 	// invalid key-file
 	dir, err := ioutil.TempDir(os.TempDir(), `secureio-unittest`)
@@ -80,12 +80,12 @@ func TestLoadPrivateKeyFromFile_negative(t *testing.T) {
 
 func TestIdentity_loadKeys_negative(t *testing.T) {
 	// invalid path
-	assert.Error(t, (&Identity{}).loadKeys(nonExistantDir))
+	assert.Error(t, (&Identity{}).loadKeys(nonExistentDir))
 }
 
 func TestIdentity_prepareKeys_negative(t *testing.T) {
 	// invalid path
-	assert.Error(t, (&Identity{}).prepareKeys(nonExistantDir))
+	assert.Error(t, (&Identity{}).prepareKeys(nonExistentDir))
 }
 
 func TestIdentity_VerifySignature_negative(t *testing.T) {

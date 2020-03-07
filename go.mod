@@ -9,13 +9,9 @@ require (
 	github.com/stretchr/testify v1.4.0
 	github.com/xaionaro-go/bytesextra v0.0.0-20200223153815-1ed74f0bfcd8
 	github.com/xaionaro-go/errors v0.0.0-20200223133802-5f1bdcd2dd3e
-	github.com/xaionaro-go/rand v0.0.0-20191005105903-aba1befc54a5
 	github.com/xaionaro-go/slice v0.0.0-20200126131228-455c082ffedb
 	github.com/xaionaro-go/unsafetools v0.0.0-20200202162159-021b112c4d30
-	golang.org/x/crypto v0.0.0-20200208060501-ecb85df21340
-	golang.org/x/sys v0.0.0-20200202164722-d101bd2416d5 // indirect
-	golang.org/x/tools v0.0.0-20200228224639-71482053b885 // indirect
-	golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543
+	golang.org/x/crypto v0.0.0-20200221231518-2aa609cf4a9d
+	golang.org/x/sys v0.0.0-20200301204400-5d559ad92b82 // indirect
 	lukechampine.com/blake3 v1.0.0
-	lukechampine.com/frand v1.1.0 // indirect
 )

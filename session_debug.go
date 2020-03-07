@@ -10,6 +10,10 @@ func (sess *Session) ifDebug(fn func()) {
 	fn()
 }
 
+func (sess *Session) isDebugEnabled() bool {
+	return sess.options.EnableDebug
+}
+
 func (sess *Session) debugf(format string, args ...interface{}) {
 	sess.ifDebug(func() {
 		defer func() { recover() }()

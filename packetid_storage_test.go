@@ -78,6 +78,41 @@ func TestPacketIDStorage_Push(t *testing.T) {
 	}
 }
 
+func benchmarkPacketIDStoragePush(b *testing.B, storSize uint, testName string) {
+	stor := newPacketIDStorage(storSize)
+	s := make([]uint64, b.N)
+	switch testName {
+	case "forward":
+		for idx := 0; idx < b.N; idx++ {
+			s[idx] = uint64(idx)
+		}
+	case "backward":
+		for idx := 0; idx < b.N; {
+			blockSize := min(int(storSize), b.N-idx)
+			for i := 0; i < blockSize; i++ {
+				s[idx+blockSize-i-1] = uint64(idx)
+			}
+			idx += int(storSize)
+		}
+	case "randomValid":
+		for idx := 0; idx < b.N; idx++ {
+			s[idx] = uint64(idx)
+		}
+		for idx := 0; idx < b.N; idx += int(storSize) {
+			blockSize := min(int(storSize), b.N-idx)
+			rand.Shuffle(blockSize, func(i, j int) {
+				s[idx+i], s[idx+j] = s[idx+j], s[idx+i]
+			})
+		}
+	case "invalid":
+		s[0] = uint64(storSize + 1)
+	}
+	b.ResetTimer()
+	for idx := 0; idx < b.N; idx++ {
+		stor.Push(s[idx])
+	}
+}
+
 func BenchmarkPacketIDStorage_Push(b *testing.B) {
 	for _, testName := range []string{"forward", "backward", "randomValid", "invalid"} {
 		b.Run(testName, func(b *testing.B) {
@@ -86,38 +121,7 @@ func BenchmarkPacketIDStorage_Push(b *testing.B) {
 					continue
 				}
 				b.Run(fmt.Sprintf("storSize%d", storSize), func(b *testing.B) {
-					stor := newPacketIDStorage(storSize)
-					s := make([]uint64, b.N)
-					switch testName {
-					case "forward":
-						for idx := 0; idx < b.N; idx++ {
-							s[idx] = uint64(idx)
-						}
-					case "backward":
-						for idx := 0; idx < b.N; {
-							blockSize := min(int(storSize), b.N-idx)
-							for i := 0; i < blockSize; i++ {
-								s[idx+blockSize-i-1] = uint64(idx)
-							}
-							idx += int(storSize)
-						}
-					case "randomValid":
-						for idx := 0; idx < b.N; idx++ {
-							s[idx] = uint64(idx)
-						}
-						for idx := 0; idx < b.N; idx += int(storSize) {
-							blockSize := min(int(storSize), b.N-idx)
-							rand.Shuffle(blockSize, func(i, j int) {
-								s[idx+i], s[idx+j] = s[idx+j], s[idx+i]
-							})
-						}
-					case "invalid":
-						s[0] = uint64(storSize + 1)
-					}
-					b.ResetTimer()
-					for idx := 0; idx < b.N; idx++ {
-						stor.Push(s[idx])
-					}
+					benchmarkPacketIDStoragePush(b, storSize, testName)
 				})
 			}
 		})

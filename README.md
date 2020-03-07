@@ -176,12 +176,13 @@ is just ignored.
 # TODO
 
 * implement smart lockers
+* support of fragmented/merged (by backend) traffic.
+* support of fragmenting traffic (to split big messages to smaller ones and then merge them back).
 * check keyCreatedAt
 * error if key hasn't changed
 * verify TS difference sanity
 * don't use `Async` for sync-writes.
 * route messenger-related errors to the messenger's handler.
-* support of fragmented/merged traffic.
 * documentation
 * consider `notewakeup` instead of `Cond.Wait`
 * consider `getg` instead of counter for LockID.

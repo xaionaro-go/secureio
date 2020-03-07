@@ -322,9 +322,7 @@ func (kx *keyExchanger) updateSecrets() (err error) {
 	return nil
 }
 
-func (kx *keyExchanger) Handle(b []byte) (err error) {
-	defer func() { err = wrapError(err) }()
-
+func (kx *keyExchanger) parseAndCheck(msg *keySeedUpdateMessage, b []byte) (err error) {
 	if len(b) < keySeedUpdateMessageSignedSize {
 		return newErrTooShort(uint(keySeedUpdateMessageSignedSize), uint(len(b)))
 	}
@@ -339,26 +337,37 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 		return
 	}
 
-	var msg keySeedUpdateMessage
-	err = binary.Read(bytes.NewBuffer(msgBytes), binaryOrderType, &msg)
+	err = binary.Read(bytes.NewBuffer(msgBytes), binaryOrderType, msg)
 	if err != nil {
-		return
+		return wrapError(err)
 	}
 
 	if msg.AnswersMode != kx.options.AnswersMode {
 		kx.messenger.sess.debugf("[kx] msg == %+v; msgBytes == %v; b == %v", msg, msgBytes, b)
-		kx.errFunc(newErrAnswersModeMismatch(kx.options.AnswersMode, msg.AnswersMode))
+		err = newErrAnswersModeMismatch(kx.options.AnswersMode, msg.AnswersMode)
+		kx.errFunc(err)
+		return
 	}
 
-	{
-		var zeroKey [curve25519PublicKeySize]byte
-		if bytes.Compare(msg.PublicKey[:], zeroKey[:]) == 0 {
-			kx.errFunc(newErrInvalidPublicKey())
-			return
-		}
+	var zeroKey [curve25519PublicKeySize]byte
+	if bytes.Compare(msg.PublicKey[:], zeroKey[:]) == 0 {
+		err = newErrInvalidPublicKey()
+		kx.errFunc(err)
+		return
 	}
 
+	return nil
+}
+
+func (kx *keyExchanger) Handle(b []byte) (err error) {
+	defer func() { err = wrapError(err) }()
+
+	var msg keySeedUpdateMessage
+	if err = kx.parseAndCheck(&msg, b); err != nil {
+		return
+	}
 	kx.messenger.sess.debugf("[kx] received msg: %+v", msg)
+
 	kx.LockDo(func() {
 		select {
 		case <-kx.ctx.Done():
@@ -516,34 +525,46 @@ func (kx *keyExchanger) updateLocalKey() (result uint64) {
 	return
 }
 
+func (kx *keyExchanger) makeSuccessNotifyChanEmpty() (isDone bool) {
+	for {
+		select {
+		case <-kx.ctx.Done():
+			return true
+		case _, ok := <-kx.successNotifyChan:
+			if !ok {
+				return true
+			}
+			continue
+		default:
+		}
+		return false
+	}
+}
+
+func (kx *keyExchanger) getNextKeyCreatedAt() (nextKeyCreatedAt uint64) {
+	kx.LockDo(func() {
+		nextKeyCreatedAt = kx.updateLocalKey()
+	})
+	kx.messenger.sess.debugf("[kx] nextKeyCreatedAt == %v", nextKeyCreatedAt)
+	return
+}
+
 func (kx *keyExchanger) KeyUpdateSendWait() {
 	kx.messenger.sess.debugf("[kx] KeyUpdateSendWait")
 	kx.keyUpdateLocker.LockDo(func() {
-		// Empty the chan (to wait for our event only on retries)
-		for {
-			select {
-			case <-kx.ctx.Done():
-				return
-			case _, ok := <-kx.successNotifyChan:
-				if !ok {
-					return
-				}
-				continue
-			default:
-			}
-			break
-		}
-
-		// Update the key (and increase nextKeyCreatedAt)
+		// Check if we may update the key right now
 		if timeNow().Before(kx.skipKeyUpdateUntil) {
 			kx.messenger.sess.debugf("[kx] somebody already updated the key, skipping key-update iteration.")
 			return
 		}
-		var nextKeyCreatedAt uint64
-		kx.LockDo(func() {
-			nextKeyCreatedAt = kx.updateLocalKey()
-		})
-		kx.messenger.sess.debugf("[kx] nextKeyCreatedAt == %v", nextKeyCreatedAt)
+
+		// Empty the chan (to wait for the our event only on retries)
+		if kx.makeSuccessNotifyChanEmpty() {
+			return
+		}
+
+		// Update the key (and increase nextKeyCreatedAt)
+		nextKeyCreatedAt := kx.getNextKeyCreatedAt()
 		if nextKeyCreatedAt == 0 {
 			return
 		}
@@ -551,57 +572,61 @@ func (kx *keyExchanger) KeyUpdateSendWait() {
 		// Send
 		kx.mustSendPublicKey(false)
 
-		// Retries:
-		checkNewKeyCreatedAt := func(newKeyCreatedAt uint64) bool {
-			kx.messenger.sess.debugf("[kx] checkNewKeyCreatedAt: %v ?= %v", newKeyCreatedAt, nextKeyCreatedAt)
-			return newKeyCreatedAt >= nextKeyCreatedAt
-		}
-		checkSuccessNotifyChan := func() bool {
-			select {
-			case newKeyCreatedAt, ok := <-kx.successNotifyChan:
-				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: late-success (keyCreatedAt == %v)", newKeyCreatedAt)
-				if !ok {
-					return true
-				}
-				return checkNewKeyCreatedAt(newKeyCreatedAt)
-			default:
-				return false
-			}
-		}
-		timeoutTimer := time.NewTimer(kx.options.Timeout)
-		retryTicker := time.NewTicker(kx.options.RetryInterval)
-		defer retryTicker.Stop()
-		for {
-			select {
-			case <-kx.ctx.Done():
-				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: done")
-				return
-			case newKeyCreatedAt, ok := <-kx.successNotifyChan:
-				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: success (keyCreatedAt == %v)", newKeyCreatedAt)
-				if !ok {
-					return
-				}
-				if checkNewKeyCreatedAt(newKeyCreatedAt) {
-					return
-				}
-			case <-retryTicker.C:
-				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: retry (waiting for keyCreatedAt == %v)", nextKeyCreatedAt)
-				if checkSuccessNotifyChan() { // just in case; TODO: check if it is really useful
-					return
-				}
-				runtime.Gosched()
-				kx.mustSendPublicKey(false)
-			case <-timeoutTimer.C:
-				kx.messenger.sess.debugf("[kx] KeyUpdateSendWait: timeout")
-				if checkSuccessNotifyChan() { // just in case; TODO: check if it is really useful
-					return
-				}
-				_ = kx.Close()
-				kx.errFunc(newErrKeyExchangeTimeout())
-				return
-			}
-		}
+		// Send retries:
+		kx.retryUntilSuccessOrTimeout(nextKeyCreatedAt)
 	})
+}
+
+func (kx *keyExchanger) retryUntilSuccessOrTimeout(nextKeyCreatedAt uint64) {
+	checkNewKeyCreatedAt := func(newKeyCreatedAt uint64) bool {
+		kx.messenger.sess.debugf("[kx] checkNewKeyCreatedAt: %v ?= %v", newKeyCreatedAt, nextKeyCreatedAt)
+		return newKeyCreatedAt >= nextKeyCreatedAt
+	}
+	checkSuccessNotifyChan := func() bool {
+		select {
+		case newKeyCreatedAt, ok := <-kx.successNotifyChan:
+			kx.messenger.sess.debugf("[kx] retryUntilSuccessOrTimeout: late-success (keyCreatedAt == %v)", newKeyCreatedAt)
+			if !ok {
+				return true
+			}
+			return checkNewKeyCreatedAt(newKeyCreatedAt)
+		default:
+			return false
+		}
+	}
+	timeoutTimer := time.NewTimer(kx.options.Timeout)
+	retryTicker := time.NewTicker(kx.options.RetryInterval)
+	defer retryTicker.Stop()
+	for {
+		select {
+		case <-kx.ctx.Done():
+			kx.messenger.sess.debugf("[kx] retryUntilSuccessOrTimeout: done")
+			return
+		case newKeyCreatedAt, ok := <-kx.successNotifyChan:
+			kx.messenger.sess.debugf("[kx] retryUntilSuccessOrTimeout: success (keyCreatedAt == %v)", newKeyCreatedAt)
+			if !ok {
+				return
+			}
+			if checkNewKeyCreatedAt(newKeyCreatedAt) {
+				return
+			}
+		case <-retryTicker.C:
+			kx.messenger.sess.debugf("[kx] retryUntilSuccessOrTimeout: retry (waiting for keyCreatedAt == %v)", nextKeyCreatedAt)
+			if checkSuccessNotifyChan() { // just in case; TODO: check if it is really useful
+				return
+			}
+			runtime.Gosched()
+			kx.mustSendPublicKey(false)
+		case <-timeoutTimer.C:
+			kx.messenger.sess.debugf("[kx] retryUntilSuccessOrTimeout: timeout")
+			if checkSuccessNotifyChan() { // just in case; TODO: check if it is really useful
+				return
+			}
+			_ = kx.Close()
+			kx.errFunc(newErrKeyExchangeTimeout())
+			return
+		}
+	}
 }
 
 func (kx *keyExchanger) mustSendPublicKey(isAnswer bool) {
