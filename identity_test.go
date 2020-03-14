@@ -64,7 +64,7 @@ func TestNewIdentity(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func testIdentityMutualConfirmationOfIdentityWithPSKs(t *testing.T, shouldFail bool, psk0, psk1 []byte) {
+func testIdentityMutualConfirmationOfIdentityWithPSKs(t *testing.T, remoteIsKnown, shouldFail bool, psk0, psk1 []byte) {
 	identity0, identity1, conn0, conn1 := testPair(t)
 
 	defer conn0.Close()
@@ -97,6 +97,10 @@ func testIdentityMutualConfirmationOfIdentityWithPSKs(t *testing.T, shouldFail b
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		identity1 := identity1
+		if !remoteIsKnown {
+			identity1 = nil
+		}
 		keys0, err0 = identity0.MutualConfirmationOfIdentity(
 			ctx,
 			identity1,
@@ -111,6 +115,10 @@ func testIdentityMutualConfirmationOfIdentityWithPSKs(t *testing.T, shouldFail b
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		identity0 := identity0
+		if !remoteIsKnown {
+			identity0 = nil
+		}
 		keys1, err1 = identity1.MutualConfirmationOfIdentity(
 			ctx,
 			identity0,
@@ -139,14 +147,14 @@ func testIdentityMutualConfirmationOfIdentityWithPSKs(t *testing.T, shouldFail b
 }
 
 func TestIdentityMutualConfirmationOfIdentityWithoutPSK(t *testing.T) {
-	testIdentityMutualConfirmationOfIdentityWithPSKs(t, false, nil, nil)
+	testIdentityMutualConfirmationOfIdentityWithPSKs(t, true, false, nil, nil)
 }
 
 func TestIdentityMutualConfirmationOfIdentityWithPSK(t *testing.T) {
 	psk := make([]byte, 64)
 	rand.Read(psk)
 
-	testIdentityMutualConfirmationOfIdentityWithPSKs(t, false, psk, psk)
+	testIdentityMutualConfirmationOfIdentityWithPSKs(t, true, false, psk, psk)
 }
 
 func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
@@ -157,5 +165,12 @@ func TestIdentityMutualConfirmationOfIdentityWithWrongPSK(t *testing.T) {
 	psk0[63] = 0
 	psk1[63] = 1
 
-	testIdentityMutualConfirmationOfIdentityWithPSKs(t, true, psk0, psk1)
+	testIdentityMutualConfirmationOfIdentityWithPSKs(t, true, true, psk0, psk1)
+}
+
+func TestIdentityMutualConfirmationOfIdentityByPSK(t *testing.T) {
+	psk := make([]byte, 64)
+	rand.Read(psk)
+
+	testIdentityMutualConfirmationOfIdentityWithPSKs(t, false, false, psk, psk)
 }

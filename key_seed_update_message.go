@@ -20,10 +20,11 @@ type keySeedUpdateMessageSigned struct {
 }
 
 type keySeedUpdateMessage struct {
-	SessionID   SessionID
-	PublicKey   [curve25519PublicKeySize]byte
-	AnswersMode KeyExchangeAnswersMode
-	Flags       keySeedUpdateMessageFlags
+	SessionID         SessionID
+	IdentityPublicKey [PublicKeySize]byte
+	KXPublicKey       [curve25519PublicKeySize]byte
+	AnswersMode       KeyExchangeAnswersMode
+	Flags             keySeedUpdateMessageFlags
 }
 
 type keySeedUpdateMessageFlags uint8

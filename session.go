@@ -129,9 +129,9 @@ type Session struct {
 	delayedWriteBufLocker    spinlock.Locker
 	delayedSenderTimer       *time.Timer
 	delayedSenderTimerLocker spinlock.Locker
-	sendDelayedNowChan    chan *SendInfo
-	sendDelayedCond       *sync.Cond
-	sendDelayedCondLocker sync.Mutex
+	sendDelayedNowChan       chan *SendInfo
+	sendDelayedCond          *sync.Cond
+	sendDelayedCondLocker    sync.Mutex
 
 	lastSendInfoSendID uint64
 
@@ -962,7 +962,7 @@ func (sess *Session) decryptPacketIDBytes(decrypted *buffer, encrypted []byte) (
 	}
 
 	packetIDBytes = decrypted.Bytes[:len(encrypted)]
-	decrypt(sess.auxCipherKey, sess.identity.Keys.Public[:ivSize], packetIDBytes, encrypted)
+	decrypt(sess.auxCipherKey, emptyIV, packetIDBytes, encrypted)
 	decrypted.Offset += uint(len(encrypted))
 	sess.debugf("decrypted the PacketID from %v to %v using key %v",
 		encrypted, packetIDBytes, sess.auxCipherKey)
@@ -1600,7 +1600,7 @@ func (sess *Session) sendMessages(
 		if sess.auxCipherKey == nil {
 			copy(encryptedBytes[:len(containerHdr.PacketID)], containerHdr.PacketID[:]) // copying the plain IV
 		} else {
-			encrypt(sess.auxCipherKey, sess.remoteIdentity.Keys.Public[:ivSize], encryptedBytes[:len(containerHdr.PacketID)], containerHdr.PacketID[:])
+			encrypt(sess.auxCipherKey, emptyIV, encryptedBytes[:len(containerHdr.PacketID)], containerHdr.PacketID[:])
 		}
 		sess.ifDebug(func() {
 			if len(encryptedBytes) >= 200 {
@@ -1658,6 +1658,15 @@ func (sess *Session) infof(format string, args ...interface{}) {
 
 func (sess *Session) error(err error) {
 	sess.eventHandler.Error(sess, err)
+}
+
+// GetRemoteIdentity returns the remote identity.
+// It's not a copy, don't modify the content.
+func (sess *Session) GetRemoteIdentity() (result *Identity) {
+	sess.rLockDo(func() {
+		result = sess.remoteIdentity
+	})
+	return
 }
 
 func (sess *Session) startKeyExchange() {
