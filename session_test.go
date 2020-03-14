@@ -117,6 +117,7 @@ func TestSessionAsyncWrite(t *testing.T) {
 			printLogsOfSession(t, true, sess)
 		}},
 		EnableDebug: true,
+		//SendDelay: &[]time.Duration{0}[0],
 	}
 
 	sess0 := identity0.NewSession(ctx, identity1, conn0, sendLogger, opts)

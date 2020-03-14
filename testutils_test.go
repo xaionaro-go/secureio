@@ -5,11 +5,13 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"math/rand"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"path"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,6 +19,7 @@ import (
 	"unsafe"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/xaionaro-go/errors"
 
@@ -107,13 +110,13 @@ var testPipeCounter uint64
 func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 *net.UnixConn) {
 	var err error
 
-	if t == nil {
-		t = &testing.T{}
-	}
-
 	go func() {
 		http.ListenAndServe("localhost:6060", nil)
 	}()
+
+	if t == nil {
+		t = &testing.T{}
+	}
 
 	keyRand := rand.New(rand.NewSource(0))
 
@@ -134,8 +137,10 @@ func testPair(t *testing.T) (identity0, identity1 *Identity, conn0, conn1 *net.U
 	testPairMutex.Lock()
 	defer testPairMutex.Unlock()
 
-	sockPath := fmt.Sprintf(`/tmp/xaionaro-go-secureio-%d-%d-0.sock`, os.Getpid(), atomic.AddUint64(&testPipeCounter, 1))
-	_ = os.Remove(sockPath)
+	tempDir, err := ioutil.TempDir(os.TempDir(), fmt.Sprintf(`xaionaro-go-secureio-%d-%d-test-`, os.Getpid(), atomic.AddUint64(&testPipeCounter, 1)))
+	require.NoError(t, err)
+	sockPath := path.Join(tempDir, "sock")
+	defer os.RemoveAll(tempDir)
 
 	l0, err := net.Listen(`unixpacket`, sockPath)
 	if err != nil {

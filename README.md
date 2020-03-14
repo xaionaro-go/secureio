@@ -11,7 +11,7 @@ Prepare keys (on both sides):
 scp ~/.ssh/id_ed25519.pub remote:from_remote_side/
 ```
 
-Encrypted `io.WriteReadCloser`, easy:
+Encrypted `io.ReadWriteCloser`, easy:
 
 ```go
 // Generate (if not exists) and read ED25519 keys 
@@ -175,7 +175,6 @@ is just ignored.
 
 # TODO
 
-* implement smart lockers
 * support of fragmented/merged (by backend) traffic.
 * support of fragmenting traffic (to split big messages to smaller ones and then merge them back).
 * check keyCreatedAt
@@ -183,9 +182,8 @@ is just ignored.
 * verify TS difference sanity
 * don't use `Async` for sync-writes.
 * route messenger-related errors to the messenger's handler.
-* documentation
+* more comments (in the code)
 * consider `notewakeup` instead of `Cond.Wait`
-* consider `getg` instead of counter for LockID.
 
 # I'm not sure if we need
 

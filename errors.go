@@ -351,3 +351,14 @@ func newErrInvalidPublicKey() error {
 func (err errInvalidPublicKey) Error() string {
 	return fmt.Sprintf("[kx] invalid public key")
 }
+
+type errUnableToLock struct{}
+
+func newErrUnableToLock() error {
+	err := errors.New(errUnableToLock{})
+	err.Traceback.CutOffFirstNLines += 2
+	return err
+}
+func (err errUnableToLock) Error() string {
+	return fmt.Sprintf("unable to get a lock")
+}

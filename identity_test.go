@@ -66,6 +66,7 @@ func TestNewIdentity(t *testing.T) {
 
 func testIdentityMutualConfirmationOfIdentityWithPSKs(t *testing.T, shouldFail bool, psk0, psk1 []byte) {
 	identity0, identity1, conn0, conn1 := testPair(t)
+
 	defer conn0.Close()
 	defer conn1.Close()
 
@@ -81,6 +82,13 @@ func testIdentityMutualConfirmationOfIdentityWithPSKs(t *testing.T, shouldFail b
 
 	ctx, cancelFunc := context.WithDeadline(context.Background(), time.Now().Add(time.Second*5))
 	defer cancelFunc()
+
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Second):
+		}
+	}()
 
 	var wg sync.WaitGroup
 

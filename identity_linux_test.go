@@ -15,7 +15,9 @@ import (
 
 func TestMissedKeySeedMessage(t *testing.T) {
 	conn0, conn1 := testUDPPair(t)
-	identity0, identity1, _, _ := testPair(t)
+	identity0, identity1, _c0, _c1 := testPair(t)
+	_c0.Close()
+	_c1.Close()
 
 	opts := &SessionOptions{}
 	opts.OnInitFuncs = []OnInitFunc{func(sess *Session) { printLogsOfSession(t, false, sess) }}
@@ -24,7 +26,15 @@ func TestMissedKeySeedMessage(t *testing.T) {
 	opts.PacketIDStorageSize = -1                             // it's UDP :(
 	opts.KeyExchangerOptions.RetryInterval = time.Millisecond // speed-up the unit test
 
-	ctx := context.Background()
+	ctx, cancelFn := context.WithCancel(context.Background())
+	defer cancelFn()
+
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Second):
+		}
+	}()
 
 	var wg sync.WaitGroup
 

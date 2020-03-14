@@ -6,15 +6,10 @@ import (
 	"sync/atomic"
 )
 
-var (
-	nextLockID uint64
-)
-
-type lockID uint64
-
 type buffer struct {
+	locker lockerRWMutex
+
 	pool          *bufferPool
-	locker        sync.RWMutex
 	isMonopolized uint32
 	isBusy        bool
 	lockID        uint64
@@ -26,67 +21,22 @@ type buffer struct {
 	MetadataVariableUInt uint
 }
 
-func (buf *buffer) IsMonopolized() bool {
-	return atomic.LoadUint32(&buf.isMonopolized) != 0
-}
-
-func (buf *buffer) SetMonopolized(prevLockID lockID, isMonopolized bool) error {
-	var addErr error
-	lockErr := buf.lockDo(prevLockID, func(lockID) {
-		if isMonopolized {
-			atomic.StoreUint32(&buf.isMonopolized, 1)
-		} else {
-			if atomic.SwapUint32(&buf.isMonopolized, 0) == 0 {
-				addErr = newErrNotMonopolized()
-			}
-		}
-	}, !isMonopolized)
-	if lockErr != nil {
-		return lockErr
-	}
-	return addErr
-}
-
-func (buf *buffer) LockDo(prevLockID lockID, fn func(lockID)) error {
-	return buf.lockDo(prevLockID, fn, false)
-}
-
-func (buf *buffer) lockDo(prevLockID lockID, fn func(lockID), ignoreIsMonopolized bool) error {
-	var lockIDValue lockID
-	if prevLockID != 0 && lockID(atomic.LoadUint64(&buf.lockID)) == prevLockID {
-		lockIDValue = prevLockID
-	} else {
-		buf.locker.Lock()
-		defer func() {
-			atomic.StoreUint64(&buf.lockID, 0)
-			buf.locker.Unlock()
-		}()
-		lockIDValue = lockID(atomic.AddUint64(&nextLockID, 1))
-		atomic.StoreUint64(&buf.lockID, uint64(lockIDValue))
-	}
-
+func (buf *buffer) LockDo(fn func()) {
 	if !buf.isBusy {
-		panic(`should not happened`)
+		panic(`should not happen`)
 	}
-	if !ignoreIsMonopolized && buf.IsMonopolized() {
-		return newErrMonopolized()
-	}
-
-	if len(buf.Bytes) > maxPossiblePacketSize {
-		panic(fmt.Sprintf(`should not happened: %v > %v`, len(buf.Bytes), maxPossiblePacketSize))
-	}
-	fn(lockID(lockIDValue))
-	if len(buf.Bytes) > maxPossiblePacketSize {
-		panic(fmt.Sprintf(`should not happened: %v > %v`, len(buf.Bytes), maxPossiblePacketSize))
-	}
-	return nil
+	buf.locker.LockDo(fn)
 }
 
-func (buf *buffer) RLockDo(fn func()) error {
-	buf.locker.RLock()
-	defer buf.locker.RUnlock()
-	fn()
-	return nil
+func (buf *buffer) Lock() {
+	if !buf.isBusy {
+		panic(`should not happen`)
+	}
+	buf.locker.Lock()
+}
+
+func (buf *buffer) Unlock() {
+	buf.locker.Unlock()
 }
 
 func (buf *buffer) Read(b []byte) (int, error) {

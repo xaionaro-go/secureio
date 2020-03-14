@@ -5,12 +5,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	mathrand "math/rand"
 	"net"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +19,7 @@ import (
 	"golang.org/x/crypto/poly1305"
 
 	xerrors "github.com/xaionaro-go/errors"
+	"github.com/xaionaro-go/spinlock"
 )
 
 const (
@@ -44,8 +43,10 @@ const (
 	// T: O(n)
 	// S: O(n)
 	//
-	// It seems to unlikely to misorder a packet for a more than
-	// 256 packets.
+	// It seems unlikely to get a legitimate misordered packet
+	// with misplacement more than 256 packets, while
+	// the performance penalty is almost absent (the value is
+	// small enough).
 	DefaultPacketIDStorageSize = 256
 )
 
@@ -95,7 +96,7 @@ func (sessID *SessionID) FillFromBytes(b []byte) {
 //
 // Session also implements io.ReadWriteCloser.
 type Session struct {
-	locker sync.RWMutex
+	locker lockerRWMutex
 
 	id             SessionID
 	ctx            context.Context
@@ -125,13 +126,12 @@ type Session struct {
 
 	delayedSendInfo          *SendInfo
 	delayedWriteBuf          *buffer
+	delayedWriteBufLocker    spinlock.Locker
 	delayedSenderTimer       *time.Timer
-	delayedSenderTimerLocker lockerMutex
-	delayedSenderLocker      sync.Mutex
-	sendDelayedNowChan       chan *SendInfo
-	sendDelayedCond          *sync.Cond
-	sendDelayedCondLocker    sync.Mutex
-	sendDelayedNowLocker     lockerMutex
+	delayedSenderTimerLocker spinlock.Locker
+	sendDelayedNowChan    chan *SendInfo
+	sendDelayedCond       *sync.Cond
+	sendDelayedCondLocker sync.Mutex
 
 	lastSendInfoSendID uint64
 
@@ -149,11 +149,11 @@ type Session struct {
 	nextPacketID      uint64
 
 	pauseWaitLocker sync.Mutex
-	pauseLocker     lockerMutex
+	pauseLocker     spinlock.Locker
 	isReadingValue  uint64
 	pauseStartChan  chan struct{}
 
-	readDeadlineLocker      lockerMutex
+	readDeadlineLocker      spinlock.Locker
 	readInterruptsRequested uint64
 	readInterruptsHappened  uint64
 
@@ -240,18 +240,18 @@ type SessionOptions struct {
 	// remembered to be able to check if packet was duplicated or
 	// reordered.
 	//
-	// By default we try to eliminate possibility of duplicate packets
+	// By default we try to eliminate possibility of duplicated packets
 	// because it could be used by malefactors. So we remember
 	// few (PacketIDStorageSize) highest values of received PacketID
 	// values and:
 	// * Drop if a packet has an ID we already remembered
 	// * Drop if a packet has an ID lower than any remembered.
 	//
-	// If it's required to disable mechanism to drop packets
+	// If it's required to disable the mechanism of dropping packets
 	// with invalid PacketID then set a negative value.
 	//
 	// Value "1" is a special value which enables the behaviour
-	// where PacketID is allowed to grow only (no misorder is allowed).
+	// where PacketID is allowed to grow only (no misordering is allowed).
 	//
 	// The default value (which is forced on a zero value) is
 	// DefaultPacketIDStorageSize.
@@ -307,7 +307,7 @@ func panicIf(err error) {
 
 type sessionIDGetterType struct {
 	rand *mathrand.Rand
-	lockerMutex
+	spinlock.Locker
 	prevTime uint64
 }
 
@@ -431,9 +431,7 @@ func newSession(
 
 	sess.sendDelayedCond = sync.NewCond(&sess.sendDelayedCondLocker)
 
-	for _, messageType := range []MessageType{messageTypeKeyExchange, MessageTypeReadWrite} {
-		sess.readChan[messageType] = make(chan *readItem, messageQueueLength)
-	}
+	sess.readChan[MessageTypeReadWrite] = make(chan *readItem, messageQueueLength)
 
 	psk := sess.options.KeyExchangerOptions.PSK
 	if psk != nil {
@@ -697,14 +695,8 @@ func (sess *Session) readerLoopCleanup() {
 		}
 		_ = messenger.Close()
 	}
-	for idx, ch := range sess.readChan {
+	for _, ch := range sess.readChan {
 		close(ch)
-		if idx == MessageTypeReadWrite {
-			// It is used in read(), so to prevent race-condition
-			// we just preserve it.
-			continue
-		}
-		delete(sess.readChan, idx)
 	}
 
 	sess.setState(SessionStateClosed)
@@ -883,7 +875,6 @@ func (sess *Session) processIncomingMessage(hdr *messageHeadersData, payload []b
 	item := sess.readItemPool.AcquireReadItem(sess.GetMaxPacketSize())
 	item.Data = item.Data[0:hdr.Length]
 	copy(item.Data, payload[0:hdr.Length])
-	sess.debugf(`sent the message %v of length %v to a Messenger`, hdr, len(item.Data))
 
 	var ch chan *readItem
 	sess.rLockDo(func() {
@@ -893,6 +884,7 @@ func (sess *Session) processIncomingMessage(hdr *messageHeadersData, payload []b
 		return
 	}
 	ch <- item
+	sess.debugf(`sent the message %v of length %v to the Messenger`, hdr, len(item.Data))
 }
 
 func (sess *Session) tryDecrypt(
@@ -1089,36 +1081,14 @@ func (sess *Session) checkMessagesChecksum(cipherKey []byte, containerHdr *messa
 	return nil
 }
 
-func (sess *Session) isAlreadyLockedByMe() bool {
-	pc := make([]uintptr, 8)
-	l := runtime.Callers(1, pc)
-	if l < 2 {
-		panic("l < 2")
-	}
-	lockDoPtr := pc[0]
-	for i := 1; i < l; i++ {
-		if pc[i] == lockDoPtr {
-			return true
-		}
-	}
-	return false
-}
-
 // lockDo locks the call of this method for other goroutines,
 // executes the function `fn` and unlocks the call.
 func (sess *Session) lockDo(fn func()) {
-	if !sess.isAlreadyLockedByMe() {
-		sess.locker.Lock()
-		defer sess.locker.Unlock()
-	}
-	fn()
+	sess.locker.LockDo(fn)
 }
 
 func (sess *Session) rLockDo(fn func()) {
-	sess.locker.RLock()
-	defer sess.locker.RUnlock()
-
-	fn()
+	sess.locker.RLockDo(fn)
 }
 
 // NewMessenger returns a io.ReadWriteCloser for a specified MessageType.
@@ -1312,7 +1282,7 @@ func (sess *Session) writeMessageAsync(
 
 	for {
 		shouldWaitForSend := false
-		sess.delayedWriteBufLockDo(0, func(delayedWriteBufLockID lockID, buf *buffer) {
+		sess.delayedWriteBufLockDo(func(buf *buffer) {
 			packetSize := messagesContainerHeadersSize + uint(len(buf.Bytes)) + messageHeadersSize + uint(len(payload))
 			if packetSize > uint(sess.GetMaxPacketSize()) {
 				if len(buf.Bytes) == 0 {
@@ -1330,7 +1300,7 @@ func (sess *Session) writeMessageAsync(
 				return
 			}
 
-			sendInfo = sess.appendToDelayedWriteBuffer(delayedWriteBufLockID, hdr, payload)
+			sendInfo = sess.appendToDelayedWriteBuffer(buf, hdr, payload)
 		})
 		if !shouldWaitForSend {
 			return
@@ -1383,153 +1353,92 @@ func (sess *Session) waitForSend(sendInfo *SendInfo) {
 			//
 			// It should be reliable and does not affect performance,
 			// but still it is very ugly...
+			var bufLen int
+			sess.delayedWriteBufLockDo(func(b *buffer) {
+				bufLen = len(b.Bytes)
+			})
+			if bufLen == 0 {
+				// OK, already sent, just exit
+				return
+			}
+			// Still not sent, re-ask to send it :(
 			sendToSendDelayedNowChan()
 		}
 	}
 }
 
-func (sess *Session) delayedWriteBufRLockDo(fn func(b *buffer)) {
-	sess.delayedWriteBufXLockDo(func(b *buffer) error {
-		return b.RLockDo(func() {
-			fn(b)
-		})
+func (sess *Session) delayedWriteBufLockDo(fn func(*buffer)) {
+	sess.delayedWriteBufLocker.LockDo(func() {
+		fn(sess.delayedWriteBuf)
 	})
-}
-
-func (sess *Session) delayedWriteBufLockDo(delayedWriteBufLockID lockID, fn func(lockID, *buffer)) {
-	sess.delayedWriteBufXLockDo(func(b *buffer) error {
-		return b.LockDo(delayedWriteBufLockID, func(lockID lockID) {
-			fn(lockID, b)
-		})
-	})
-}
-
-func (sess *Session) delayedWriteBufXLockDo(fn func(*buffer) error) {
-	count := 0
-	for {
-		buf := (*buffer)(atomic.LoadPointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.delayedWriteBuf))))
-		if !buf.incRefCount() {
-			continue
-		}
-		bufCmp := (*buffer)(atomic.LoadPointer((*unsafe.Pointer)((unsafe.Pointer)(&sess.delayedWriteBuf))))
-		if buf != bufCmp {
-			buf.Release()
-			continue
-		}
-		err := fn(buf)
-		buf.Release()
-		switch {
-		case err == nil:
-			return
-		case errors.As(err, &errMonopolized{}):
-			count++
-			// Actually `100000` is too much. "1" or "2" should be enough.
-			// But just in case. See comments in `sendDelayedNow`.
-			if count > 100000 {
-				panic(`it seems the buffer wan't switched (an error in the code) and I got to a loop`)
-			}
-
-			runtime.Gosched() // wait until the buffer will be `Swap`-ped or de-`Monopolize`-d.
-			continue
-		default:
-			panic(err)
-		}
-	}
 }
 
 func (sess *Session) appendToDelayedWriteBuffer(
-	delayedWriteBufLockID lockID,
+	buf *buffer,
 	hdr *messageHeaders,
 	payload []byte,
 ) (sendInfo *SendInfo) {
-	sess.delayedWriteBufLockDo(delayedWriteBufLockID, func(_ lockID, buf *buffer) {
-		startIdx := uint(len(buf.Bytes))
-		endIdx := uint(startIdx) + messageHeadersSize + uint(len(payload))
-		buf.Bytes = buf.Bytes[:endIdx]
-		msgBuf := buf.Bytes[startIdx:endIdx]
-		_, err := hdr.Write(msgBuf)
-		if err != nil {
-			sess.eventHandler.Error(sess, wrapError(err))
-			buf.Bytes = buf.Bytes[:startIdx]
-			return
-		}
+	startIdx := uint(len(buf.Bytes))
+	endIdx := startIdx + messageHeadersSize + uint(len(payload))
+	buf.Bytes = buf.Bytes[:endIdx]
+	msgBuf := buf.Bytes[startIdx:endIdx]
+	_, err := hdr.Write(msgBuf)
+	if err != nil {
+		sess.eventHandler.Error(sess, wrapError(err))
+		buf.Bytes = buf.Bytes[:startIdx]
+		return
+	}
 
-		copy(msgBuf[messageHeadersSize:], payload)
+	copy(msgBuf[messageHeadersSize:], payload)
 
-		// No atomicity is required here (with sendInfo) because delayedWriteBuf's Lock handles this problem
-		sendInfo = sess.delayedSendInfo
-		if sendInfo.incRefCount() == 1 {
-			panic(fmt.Sprintf("%+v", sendInfo))
-		}
-		sess.delayedSenderTimerLocker.LockDo(func() {
-			sess.delayedSenderTimer.Reset(*sess.options.SendDelay)
-		})
-		atomic.StoreUint64(&sess.lastSendInfoSendID, sendInfo.sendID)
-
-		buf.MetadataVariableUInt++
+	// No atomicity is required here (with sendInfo) because delayedWriteBuf's Lock handles this problem
+	sendInfo = sess.delayedSendInfo
+	if sendInfo.incRefCount() == 1 {
+		panic(fmt.Sprintf("%+v", sendInfo))
+	}
+	sess.delayedSenderTimerLocker.LockDo(func() {
+		sess.delayedSenderTimer.Reset(*sess.options.SendDelay)
 	})
+	atomic.StoreUint64(&sess.lastSendInfoSendID, sendInfo.sendID)
+
+	buf.MetadataVariableUInt++
 	sess.debugf("appendToDelayedWriteBuffer() -> %+v", sendInfo)
 	return
 }
 
-// this function couldn't be used concurrently
-func (sess *Session) sendDelayedNow(
-	delayedWriteBufLockID lockID,
-	isSync bool,
-) uint64 {
-	sess.sendDelayedNowLocker.Lock()
-	defer sess.sendDelayedNowLocker.Unlock()
+func (sess *Session) sendDelayedNow() uint64 {
+	sess.ifDebug(func() { sess.debugf(`sendDelayedNow()`) })
 
-	sess.ifDebug(func() { sess.debugf(`sendDelayedNow(%v, %v)`, delayedWriteBufLockID, isSync) })
-
-	// This lines should be before `SetMonopolized` because nothing
+	// This lines should be before `Lock` because nothing
 	// should (even very temporary) lock a routine between
-	// `SetMonopolized` and `SwapPointer`. Otherwise function
+	// `Lock` and `SwapPointer`. Otherwise function
 	// `delayedWriteBufXLockDo` may work wrong (however it has 1000
 	// tries within, so it's actually safe, but anyway this way is better).
 	newSendInfo := sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 	nextBuf := sess.bufferPool.AcquireBuffer()
 	nextBuf.Bytes = nextBuf.Bytes[:0]
 
-	// Only this function changes sess.delayedWriteBuf pointer, but it's already locked by
-	// the line above. So we can extract the value with `atomic` here.
-	err := sess.delayedWriteBuf.SetMonopolized(delayedWriteBufLockID, true)
-	if err != nil {
-		panic(err)
-	}
-
 	var oldSendInfo *SendInfo
-	// No atomicity is required here (with sendInfo) because delayedWriteBuf's Lock handles this problem.
-	// That's why "SwapPointer" should be after this line (not before).
-	oldSendInfo, sess.delayedSendInfo = sess.delayedSendInfo, newSendInfo
-
-	// Atomic read is in `delayedWriteBufXLockDo`
-	buf := (*buffer)(atomic.SwapPointer(
-		(*unsafe.Pointer)((unsafe.Pointer)(&sess.delayedWriteBuf)),
-		(unsafe.Pointer)(nextBuf)),
-	)
+	var buf *buffer
+	sess.delayedWriteBufLocker.LockDo(func() {
+		oldSendInfo, sess.delayedSendInfo = sess.delayedSendInfo, newSendInfo
+		buf, sess.delayedWriteBuf = sess.delayedWriteBuf, nextBuf
+	})
 
 	if sess.options.EnableDebug {
-		defer sess.debugf(`/sendDelayedNow(%v, %v): len(buf.Bytes) == %v`,
-			delayedWriteBufLockID, isSync, len(buf.Bytes))
-	}
-
-	callSend := func() {
-		if len(buf.Bytes) > 0 {
-			oldSendInfo.N, oldSendInfo.Err = sess.sendDelayedNowSyncFromBuffer(buf)
-			sess.debugf("oldSendInfo -> %+v", oldSendInfo)
-		}
-		close(oldSendInfo.c)
-		oldSendInfo.Release()
-		buf.Release()
+		defer sess.debugf(`/sendDelayedNow(): len(buf.Bytes) == %v`,
+			len(buf.Bytes))
 	}
 
 	sendID := oldSendInfo.sendID
-	if isSync {
-		callSend()
-	} else {
-		go callSend()
+
+	if len(buf.Bytes) > 0 {
+		oldSendInfo.N, oldSendInfo.Err = sess.sendDelayedNowSyncFromBuffer(buf)
+		sess.debugf("oldSendInfo -> %+v", oldSendInfo)
 	}
+	close(oldSendInfo.c)
+	oldSendInfo.Release()
+	buf.Release()
 
 	return sendID
 }
@@ -1580,7 +1489,7 @@ func (sess *Session) delayedSenderLoop() {
 			defer sendInfo.Release()
 			sess.debugf("delayedSenderLoop(): sendInfo := <-sess.sendDelayedNowChan: %+v; lastSendID == %v",
 				sendInfo, lastSendID)
-			if sendInfo.sendID == lastSendID {
+			if sendInfo.sendID <= lastSendID {
 				return true
 			}
 		case <-sess.ctx.Done():
@@ -1590,7 +1499,7 @@ func (sess *Session) delayedSenderLoop() {
 			sess.debugf("delayedSenderLoop(): <-sess.delayedSenderTimer.c")
 		}
 
-		sendID := sess.sendDelayedNow(0, true)
+		sendID := sess.sendDelayedNow()
 		if atomic.LoadUint64(&sess.lastSendInfoSendID) > sendID {
 			sess.delayedSenderTimerLocker.LockDo(func() {
 				if !sess.delayedSenderTimer.Stop() {
@@ -1790,7 +1699,7 @@ func (sess *Session) startKeyExchange() {
 			sess.eventHandler.OnConnect(sess)
 
 			sess.debugf("keyexchange: sess.sendDelayedNow()")
-			for sess.sendDelayedNow(0, true) == 0 {
+			for sess.sendDelayedNow() == 0 {
 			}
 			if sess.options.SendDelay != nil {
 				sess.startDelayedSender()
@@ -1944,7 +1853,7 @@ func (sess *Session) startClosing() {
 		case <-sess.ctx.Done():
 		}
 	}()
-	for sess.sendDelayedNow(0, true) == 0 {
+	for sess.sendDelayedNow() == 0 {
 	}
 	sess.cancelFunc()
 }

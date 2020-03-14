@@ -96,7 +96,7 @@ type keyExchanger struct {
 	localKeyCreatedAt     uint64
 	nextLocalKeyCreatedAt uint64
 	successNotifyChan     chan uint64
-	keyUpdateLocker       lockerRWMutex
+	keyUpdateLocker       lockerMutex
 	skipKeyUpdateUntil    time.Time
 
 	cryptoRandReader io.Reader
