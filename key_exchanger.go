@@ -361,6 +361,57 @@ func (kx *keyExchanger) parseAndCheck(msg *keySeedUpdateMessage, b []byte) (err 
 	return nil
 }
 
+func (kx *keyExchanger) setRemoteIdentityFromPublicKey(origMsg, remotePubKey []byte) (isOK bool) {
+	kx.messenger.sess.debugf("[kx] setting the remote identity to %+v", remotePubKey[:])
+
+	// Parse the remote key
+	remoteIdentity, err := NewRemoteIdentityFromPublicKey(remotePubKey[:])
+	if err != nil {
+		kx.errFunc(wrapError(err))
+		return false
+	}
+
+	// The signature wasn't verified on the stage of kx.parseAndCheck, so we need to verify it at least now
+	if len(origMsg) < keySeedUpdateMessageSignedSize {
+		kx.errFunc(xerrors.Errorf("[kx] too short message: %d < %d", len(origMsg), keySeedUpdateMessageSignedSize))
+		return false
+	}
+	if err = remoteIdentity.VerifySignature(origMsg[:keySignatureSize], origMsg[keySignatureSize:keySeedUpdateMessageSignedSize]); err != nil {
+		kx.messenger.sess.debugf("[kx] ignoring the message from %+v due to the wrong signature: %v", remoteIdentity, err)
+		return false
+	}
+
+	// Everything is OK, let's remember the new value
+	kx.remoteIdentity = remoteIdentity
+	kx.messenger.sess.lockDo(func() {
+		kx.messenger.sess.remoteIdentity = kx.remoteIdentity
+	})
+	return true
+}
+
+func (kx *keyExchanger) setRemoteSessionID(sessID *SessionID) {
+	kx.messenger.sess.debugf("[kx] setting the remote session ID to %+v", sessID)
+	kx.remoteSessionID = sessID
+	kx.messenger.sess.setRemoteSessionID(kx.remoteSessionID)
+}
+
+func (kx *keyExchanger) setNextRemotePublicKey(kxPublicKey *[32]byte) {
+	nextRemoteHasChanged := true
+	kx.keyLocker.LockDo(func() {
+		if kx.nextRemotePublicKey != nil &&
+			bytes.Compare((*kx.nextRemotePublicKey)[:], kxPublicKey[:]) == 0 {
+			nextRemoteHasChanged = false
+			return
+		}
+		kx.prevRemotePublicKey = kx.nextRemotePublicKey
+		kx.nextRemotePublicKey = kxPublicKey
+	})
+	if !nextRemoteHasChanged {
+		//kx.errFunc(newErrRemoteKeyHasNotChanged())
+		//return
+	}
+}
+
 func (kx *keyExchanger) Handle(b []byte) (err error) {
 	defer func() { err = wrapError(err) }()
 
@@ -380,36 +431,16 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 		defer func() { err = wrapError(err) }()
 
 		if kx.remoteIdentity == nil {
-			kx.messenger.sess.debugf("[kx] setting the remote identity to %+v", msg.KXPublicKey[:])
-			kx.remoteIdentity, err = NewRemoteIdentityFromPublicKey(msg.IdentityPublicKey[:])
-			if err != nil {
-				kx.errFunc(wrapError(err))
+			if !kx.setRemoteIdentityFromPublicKey(b, msg.IdentityPublicKey[:]) {
 				return
 			}
-			kx.messenger.sess.lockDo(func() {
-				kx.messenger.sess.remoteIdentity = kx.remoteIdentity
-			})
 		}
 
 		if kx.remoteSessionID == nil {
-			kx.remoteSessionID = &msg.SessionID
-			kx.messenger.sess.setRemoteSessionID(kx.remoteSessionID)
+			kx.setRemoteSessionID(&msg.SessionID)
 		}
 
-		nextRemoteHasChanged := true
-		kx.keyLocker.LockDo(func() {
-			if kx.nextRemotePublicKey != nil &&
-				bytes.Compare((*kx.nextRemotePublicKey)[:], msg.KXPublicKey[:]) == 0 {
-				nextRemoteHasChanged = false
-				return
-			}
-			kx.prevRemotePublicKey = kx.nextRemotePublicKey
-			kx.nextRemotePublicKey = &msg.KXPublicKey
-		})
-		if !nextRemoteHasChanged {
-			//kx.errFunc(newErrRemoteKeyHasNotChanged())
-			//return
-		}
+		kx.setNextRemotePublicKey(&msg.KXPublicKey)
 
 		err = kx.updateSecrets()
 		if err != nil {
