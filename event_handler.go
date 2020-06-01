@@ -2,10 +2,6 @@ package secureio
 
 // EventHandler is a collection of callbacks.
 type EventHandler interface {
-	// OnInit is called when the session is already ready-to-go, but
-	// not started, yet.
-	OnInit(*Session)
-
 	// OnConnect is called right after the first successful key exchange
 	// with the remote side.
 	OnConnect(*Session)
@@ -17,7 +13,6 @@ type EventHandler interface {
 
 type dummyEventHandler struct{}
 
-func (h *dummyEventHandler) OnInit(*Session)            {}
 func (h *dummyEventHandler) OnConnect(*Session)         {}
 func (h *dummyEventHandler) IsDebugEnabled() bool       { return false }
 func (h *dummyEventHandler) Error(*Session, error) bool { return false }

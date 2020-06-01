@@ -12,10 +12,8 @@ import (
 )
 
 func dummySession(t *testing.T, errFunc func(error)) *Session {
-	ctx := context.Background()
-
 	sess := &Session{}
-	sess.init(ctx, &Identity{}, &Identity{}, iotools.NewReadWriteCloser(func(bytes []byte) (int, error) {
+	sess.init(&Identity{}, &Identity{}, iotools.NewReadWriteCloser(func(bytes []byte) (int, error) {
 		t.Fatal("read", bytes)
 		return len(bytes), nil
 	}, func(bytes []byte) (int, error) {
@@ -29,6 +27,8 @@ func dummySession(t *testing.T, errFunc func(error)) *Session {
 		return false
 	}), nil)
 	sess.keyExchanger = &keyExchanger{}
+	sess.ctx, sess.cancelFunc = context.WithCancel(context.Background())
+	sess.delayedSendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 
 	return sess
 }

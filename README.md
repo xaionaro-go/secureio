@@ -24,7 +24,8 @@ remoteIdentity, err := secureio.NewRemoteIdentityFromPublicKey(`/home/user/from_
 conn, err := net.Dial("udp", "10.0.0.2:1234")
 
 // Create an encrypted connection (and exchange keys using ECDH and verify remote side by ED25519 signature).
-session := identity.NewSession(context.Background(), remoteIdentity, conn, nil, nil)
+session := identity.NewSession(remoteIdentity, conn, nil, nil)
+session.Start(context.Background())
 
 // Use it!
 
@@ -188,10 +189,7 @@ states/phases/stages:
 ### Initialization
 
 This is the stage where all the options are parsed and all the required
-goroutines are being initialized. After preparing everything to switch into
-"Key exchanging" phase, but right before just doing so, `*Session` calls
-`OnInit` method of `EventHandler` (if it is not `nil`) and `OnInitFuncs`
-functions of `SessionOptions`.
+goroutines are being initialized.
 
 After that `*Session` will be switched to the "Key Exchanging" state.
 

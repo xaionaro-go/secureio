@@ -47,8 +47,6 @@ func (l *testLogger) Debugf(fm string, args ...interface{}) {
 }
 func (l *testLogger) OnConnect(*secureio.Session) {
 }
-func (l *testLogger) OnInit(*secureio.Session) {
-}
 func (l *testLogger) IsDebugEnabled() bool {
 	return true
 }
@@ -90,8 +88,11 @@ func main() {
 
 	ctx := context.Background()
 
-	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{"0"}, nil)
-	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{"1"}, nil)
+	sess0 := identity0.NewSession(identity1, conn0, &testLogger{"0"}, nil)
+	fatalError(sess0.Start(ctx))
+
+	sess1 := identity1.NewSession(identity0, conn1, &testLogger{"1"}, nil)
+	fatalError(sess1.Start(ctx))
 
 	fmt.Println("write")
 

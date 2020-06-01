@@ -8,7 +8,6 @@ import (
 
 type muteEventHandler struct{}
 
-func (h *muteEventHandler) OnInit(*Session)            {}
 func (h *muteEventHandler) OnConnect(*Session)         {}
 func (h *muteEventHandler) IsDebugEnabled() bool       { return false }
 func (h *muteEventHandler) Error(*Session, error) bool { return true }
@@ -29,6 +28,5 @@ func TestDummyEventHandler(t *testing.T) {
 		panic("should not happen")
 	}).Error(sess, nil)
 
-	wrapErrorHandler(nil, nil).OnInit(nil)
 	wrapErrorHandler(nil, nil).OnConnect(nil)
 }

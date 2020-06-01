@@ -252,10 +252,6 @@ type SessionOptions struct {
 	// to communicate through given underlying io.ReadWriteCloser.
 	NegotiatorOptions NegotiatorOptions
 
-	// OnInitFuncs are the function which will be called right before Start
-	// the Session (but after performing the self-configuration).
-	OnInitFuncs []OnInitFunc
-
 	// PacketIDStorageSize defines how many PacketID values could be
 	// remembered to be able to check if packet was duplicated or
 	// reordered.
@@ -277,10 +273,6 @@ type SessionOptions struct {
 	// DefaultPacketIDStorageSize.
 	PacketIDStorageSize int
 }
-
-// OnInitFunc is a function which will be called after a Session
-// already setup everything to be ready-to-go, but not started, yet.
-type OnInitFunc func(sess *Session)
 
 // GetUnexpectedPacketIDCount returns the amount of packets which were
 // ignored due to a wrong PacketID.
@@ -368,7 +360,6 @@ func init() {
 }
 
 func newSession(
-	ctx context.Context,
 	identity, remoteIdentity *Identity,
 	backend io.ReadWriteCloser,
 	eventHandler EventHandler,
@@ -377,19 +368,16 @@ func newSession(
 	sess := &Session{}
 
 	sess.init(
-		ctx,
 		identity, remoteIdentity,
 		backend,
 		eventHandler,
 		opts,
 	)
 
-	panicIf(sess.start())
 	return sess
 }
 
 func (sess *Session) init(
-	ctx context.Context,
 	identity, remoteIdentity *Identity,
 	backend io.ReadWriteCloser,
 	eventHandler EventHandler,
@@ -414,7 +402,6 @@ func (sess *Session) init(
 		isEstablished:        make(chan struct{}),
 	}
 
-	sess.ctx, sess.cancelFunc = context.WithCancel(ctx)
 	if opts != nil {
 		sess.options = *opts
 	}
@@ -463,8 +450,6 @@ func (sess *Session) init(
 	sess.delayedWriteBuf.Bytes = sess.delayedWriteBuf.Bytes[:0]
 
 	sess.sendInfoPool = newSendInfoPool(sess)
-	sess.delayedSendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
-
 	sess.readItemPool = newReadItemPool()
 	sess.messageHeadersPool = newMessageHeadersPool()
 	sess.messagesContainerHeadersPool = newMessagesContainerHeadersPool()
@@ -567,11 +552,22 @@ func (sess *Session) ID() SessionID {
 	return sess.id
 }
 
-func (sess *Session) start() error {
-	for _, onInitFunc := range sess.options.OnInitFuncs {
-		onInitFunc(sess)
+// Start runs all the goroutines to make the session work. The session
+// will not work until Start will be called.
+func (sess *Session) Start(ctx context.Context) error {
+	var err error
+	sess.lockDo(func() {
+		if sess.ctx != nil {
+			err = newErrAlreadyStarted()
+			return
+		}
+		sess.ctx, sess.cancelFunc = context.WithCancel(ctx)
+	})
+	if err != nil {
+		return err
 	}
-	sess.eventHandler.OnInit(sess)
+
+	sess.delayedSendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
 	sess.initNegotiator()
 	sess.startKeyExchange()
 	sess.startReader()
@@ -641,6 +637,9 @@ func (sess *Session) isDone() bool {
 }
 
 func (sess *Session) isDoneSlow() bool {
+	if sess.ctx == nil {
+		return false
+	}
 	select {
 	case <-sess.ctx.Done():
 		return true

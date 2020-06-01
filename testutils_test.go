@@ -32,7 +32,6 @@ const (
 
 type testLogger struct {
 	*testing.T
-	Session *Session
 }
 
 func (l *testLogger) Error(sess *Session, err error) bool {
@@ -49,9 +48,6 @@ func (l *testLogger) Error(sess *Session, err error) bool {
 	return false
 }
 func (l *testLogger) OnConnect(sess *Session) {
-}
-func (l *testLogger) OnInit(sess *Session) {
-	l.Session = sess
 }
 
 var testPairMutex sync.Mutex
@@ -209,7 +205,6 @@ func testConnIsOpen(t *testing.T, conn0, conn1 io.ReadWriteCloser) {
 
 type dummyEventHandler struct{}
 
-func (h *dummyEventHandler) OnInit(*Session)            {}
 func (h *dummyEventHandler) OnConnect(*Session)         {}
 func (h *dummyEventHandler) IsDebugEnabled() bool       { return false }
 func (h *dummyEventHandler) Error(*Session, error) bool { return false }

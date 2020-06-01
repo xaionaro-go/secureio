@@ -20,11 +20,15 @@ func TestMissedKeySeedMessage(t *testing.T) {
 	_c1.Close()
 
 	opts := &SessionOptions{}
-	opts.OnInitFuncs = []OnInitFunc{func(sess *Session) { printLogsOfSession(t, false, sess) }}
 	opts.EnableDebug = true
 	opts.EnableInfo = true
 	opts.PacketIDStorageSize = -1                             // it's UDP :(
 	opts.KeyExchangerOptions.RetryInterval = time.Millisecond // speed-up the unit test
+
+	attachLogsFunc := func(sess *Session) error {
+		printLogsOfSession(t, false, sess)
+		return nil
+	}
 
 	ctx, cancelFn := context.WithCancel(context.Background())
 	defer cancelFn()
@@ -41,7 +45,7 @@ func TestMissedKeySeedMessage(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		keys, err := identity0.MutualConfirmationOfIdentity(ctx, identity1, conn0, &testLogger{t, nil}, opts)
+		keys, err := identity0.MutualConfirmationOfIdentity(ctx, identity1, conn0, &testLogger{t}, opts, attachLogsFunc)
 		assert.NoError(t, err)
 		if assert.Equal(t, 4, len(keys)) {
 			assert.Equal(t, 32, len(keys[0]))
@@ -56,7 +60,7 @@ func TestMissedKeySeedMessage(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		keys, err := identity1.MutualConfirmationOfIdentity(ctx, identity0, conn1, &testLogger{t, nil}, opts)
+		keys, err := identity1.MutualConfirmationOfIdentity(ctx, identity0, conn1, &testLogger{t}, opts, attachLogsFunc)
 		assert.NoError(t, err)
 		if assert.Equal(t, 4, len(keys)) {
 			assert.Equal(t, 32, len(keys[0]))

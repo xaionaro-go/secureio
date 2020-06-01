@@ -16,10 +16,12 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/xaionaro-go/slice"
 	"github.com/xaionaro-go/unsafetools"
 
 	xerrors "github.com/xaionaro-go/errors"
+
 	. "github.com/xaionaro-go/secureio"
 )
 
@@ -29,20 +31,24 @@ func TestSessionBigWrite(t *testing.T) {
 	identity0, identity1, conn0, conn1 := testPair(t)
 
 	opts := &SessionOptions{
-		OnInitFuncs: []OnInitFunc{func(sess *Session) {
-			printLogsOfSession(t, true, sess)
-		}},
 		EnableDebug: true,
 	}
 
-	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
-	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{t, nil}, opts)
+	sess0 := identity0.NewSession(identity1, conn0, &testLogger{t}, opts)
+	printLogsOfSession(t, true, sess0)
+	err := sess0.Start(ctx)
+	require.NoError(t, err)
+
+	sess1 := identity1.NewSession(identity0, conn1, &testLogger{t}, opts)
+	printLogsOfSession(t, true, sess1)
+	err = sess1.Start(ctx)
+	require.NoError(t, err)
 
 	writeBuf := make([]byte, sess0.GetPayloadSizeLimit())
 	rand.Read(writeBuf)
 	readBuf := make([]byte, sess0.GetPayloadSizeLimit())
 
-	_, err := sess0.Write(writeBuf)
+	_, err = sess0.Write(writeBuf)
 	assert.NoError(t, err)
 
 	_, err = sess1.Read(readBuf)
@@ -69,14 +75,17 @@ func TestSessionWaitForSendInfo(t *testing.T) {
 	identity0, identity1, conn0, conn1 := testPair(t)
 
 	opts := &SessionOptions{
-		OnInitFuncs: []OnInitFunc{func(sess *Session) {
-			printLogsOfSession(t, true, sess)
-		}},
 		EnableDebug: true,
 	}
 
-	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
-	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{t, nil}, opts)
+	sess0 := identity0.NewSession(identity1, conn0, &testLogger{t}, opts)
+	printLogsOfSession(t, true, sess0)
+	err := sess0.Start(ctx)
+
+	sess1 := identity1.NewSession(identity0, conn1, &testLogger{t}, opts)
+	printLogsOfSession(t, true, sess1)
+	err = sess1.Start(ctx)
+	require.NoError(t, err)
 
 	writeBuf := make([]byte, 8)
 	rand.Read(writeBuf)
@@ -111,17 +120,21 @@ func TestSessionAsyncWrite(t *testing.T) {
 
 	identity0, identity1, conn0, conn1 := testPair(t)
 
-	sendLogger := &testLogger{t, nil}
+	sendLogger := &testLogger{t}
 	opts := &SessionOptions{
-		OnInitFuncs: []OnInitFunc{func(sess *Session) {
-			printLogsOfSession(t, true, sess)
-		}},
 		EnableDebug: true,
 		//SendDelay: &[]time.Duration{0}[0],
 	}
 
-	sess0 := identity0.NewSession(ctx, identity1, conn0, sendLogger, opts)
-	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{t, nil}, opts)
+	sess0 := identity0.NewSession(identity1, conn0, sendLogger, opts)
+	printLogsOfSession(t, true, sess0)
+	err := sess0.Start(ctx)
+	require.NoError(t, err)
+
+	sess1 := identity1.NewSession(identity0, conn1, &testLogger{t}, opts)
+	printLogsOfSession(t, true, sess1)
+	err = sess1.Start(ctx)
+	require.NoError(t, err)
 
 	var wg sync.WaitGroup
 
@@ -164,7 +177,7 @@ func TestSession_WriteMessageAsync_noHanging(t *testing.T) {
 	benchmarkSessionWriteRead(
 		&testing.B{N: 10000},
 		1, 0, true, false,
-		&testLogger{t, nil},
+		&testLogger{t},
 	)
 }
 
@@ -243,8 +256,10 @@ func benchmarkSessionWriteRead(
 		}
 	}
 
-	sess0 := identity0.NewSession(ctx, identity1, conn0, eventHandler, opts)
-	sess1 := identity1.NewSession(ctx, identity0, conn1, eventHandler, opts)
+	sess0 := identity0.NewSession(identity1, conn0, eventHandler, opts)
+	_ = sess0.Start(ctx)
+	sess1 := identity1.NewSession(identity0, conn1, eventHandler, opts)
+	_ = sess1.Start(ctx)
 	defer func() {
 		cancelFunc()
 		sess0.Close()
@@ -355,9 +370,6 @@ func TestHackerDuplicateMessage(t *testing.T) {
 	identity0, identity1, conn0, conn1 := testPair(t)
 
 	opts := &SessionOptions{
-		OnInitFuncs: []OnInitFunc{func(sess *Session) {
-			printLogsOfSession(t, true, sess)
-		}},
 		EnableDebug: true,
 		KeyExchangerOptions: KeyExchangerOptions{
 			AnswersMode:   KeyExchangeAnswersModeDisable,
@@ -367,8 +379,15 @@ func TestHackerDuplicateMessage(t *testing.T) {
 
 	// No hacker, yet
 
-	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
-	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{t, nil}, opts)
+	sess0 := identity0.NewSession(identity1, conn0, &testLogger{t}, opts)
+	printLogsOfSession(t, true, sess0)
+	err := sess0.Start(ctx)
+	require.NoError(t, err)
+
+	sess1 := identity1.NewSession(identity0, conn1, &testLogger{t}, opts)
+	printLogsOfSession(t, true, sess1)
+	err = sess1.Start(ctx)
+	require.NoError(t, err)
 
 	// Now a hacker appears, listens a message in the middle a repeats it.
 	// A secureio client should ignore the duplicate
@@ -389,7 +408,7 @@ func TestHackerDuplicateMessage(t *testing.T) {
 	// and now we can intercept it), so sending a message:
 	writeBuf := make([]byte, msgSize)
 	rand.Read(writeBuf)
-	_, err := sess0.Write(writeBuf)
+	_, err = sess0.Write(writeBuf)
 	assert.NoError(t, err)
 
 	// And intercepting it:
@@ -491,14 +510,18 @@ func TestSession_WriteMessageAsync_sendNow(t *testing.T) {
 	identity0, identity1, conn0, conn1 := testPair(t)
 
 	opts := &SessionOptions{
-		OnInitFuncs: []OnInitFunc{func(sess *Session) {
-			printLogsOfSession(t, true, sess)
-		}},
 		EnableDebug: true,
 	}
 
-	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
-	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{t, nil}, opts)
+	sess0 := identity0.NewSession(identity1, conn0, &testLogger{t}, opts)
+	printLogsOfSession(t, true, sess0)
+	err := sess0.Start(ctx)
+	require.NoError(t, err)
+
+	sess1 := identity1.NewSession(identity0, conn1, &testLogger{t}, opts)
+	printLogsOfSession(t, true, sess1)
+	err = sess1.Start(ctx)
+	require.NoError(t, err)
 
 	sess0.WaitForState(ctx, SessionStateEstablished)
 	sess1.WaitForState(ctx, SessionStateEstablished)
@@ -526,7 +549,9 @@ func TestSession_uncovered(t *testing.T) {
 		SendDelay:                          &[]time.Duration{0}[0],
 	}
 	conn := newErroneousConn()
-	sess0 := identity0.NewSession(ctx, identity1, conn, &testLogger{t, nil}, opts)
+	sess0 := identity0.NewSession(identity1, conn, &testLogger{t}, opts)
+	err := sess0.Start(ctx)
+	require.NoError(t, err)
 	assert.NotEqual(t, SessionID{}, sess0.ID())
 
 	var wg sync.WaitGroup
@@ -557,17 +582,18 @@ func TestSession_WriteMessageTooBig(t *testing.T) {
 	identity0, identity1, conn0, _ := testPair(t)
 
 	opts := &SessionOptions{
-		OnInitFuncs: []OnInitFunc{func(sess *Session) {
-			printLogsOfSession(t, true, sess)
-		}},
 		EnableDebug: true,
 	}
 
-	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
+	sess0 := identity0.NewSession(identity1, conn0, &testLogger{t}, opts)
+	printLogsOfSession(t, true, sess0)
+	err := sess0.Start(ctx)
+	require.NoError(t, err)
+
 	writeBuf := make([]byte, sess0.GetPayloadSizeLimit()*2)
 	rand.Read(writeBuf)
 
-	_, err := sess0.Write(writeBuf)
+	_, err = sess0.Write(writeBuf)
 	assert.Error(t, err)
 	_ = sess0.CloseAndWait()
 }
@@ -596,8 +622,13 @@ func TestSession_answerModeMismatch(t *testing.T) {
 		receivedMismatch = receivedMismatch || xerr.Has(ErrAnswersModeMismatch{})
 		return false
 	}
-	sess0 := identity0.NewSession(ctx, identity1, conn0, wrapErrorHandler(nil, errorHandler), opts0)
-	sess1 := identity1.NewSession(ctx, identity0, conn1, wrapErrorHandler(nil, errorHandler), opts1)
+	sess0 := identity0.NewSession(identity1, conn0, wrapErrorHandler(nil, errorHandler), opts0)
+	err := sess0.Start(ctx)
+	require.NoError(t, err)
+
+	sess1 := identity1.NewSession(identity0, conn1, wrapErrorHandler(nil, errorHandler), opts1)
+	err = sess1.Start(ctx)
+	require.NoError(t, err)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -625,9 +656,6 @@ func TestSessionKeyRenew(t *testing.T) {
 	identity0, identity1, conn0, conn1 := testPair(t)
 
 	opts := &SessionOptions{
-		OnInitFuncs: []OnInitFunc{func(sess *Session) {
-			printLogsOfSession(t, true, sess)
-		}},
 		EnableDebug: true,
 		KeyExchangerOptions: KeyExchangerOptions{
 			KeyUpdateInterval: time.Microsecond,
@@ -636,8 +664,15 @@ func TestSessionKeyRenew(t *testing.T) {
 		},
 	}
 
-	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
-	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{t, nil}, opts)
+	sess0 := identity0.NewSession(identity1, conn0, &testLogger{t}, opts)
+	printLogsOfSession(t, true, sess0)
+	err := sess0.Start(ctx)
+	require.NoError(t, err)
+
+	sess1 := identity1.NewSession(identity0, conn1, &testLogger{t}, opts)
+	printLogsOfSession(t, true, sess1)
+	err = sess1.Start(ctx)
+	require.NoError(t, err)
 
 	for {
 		if sess0.GetCipherKeysWait()[3] != nil {
@@ -672,4 +707,54 @@ func TestSessionKeyRenew(t *testing.T) {
 		}
 	}
 	assert.Fail(t, "no key matches were found", fmt.Sprint(keys0, keys1))
+}
+
+func TestSession_SetHandlerFuncs(t *testing.T) {
+	ctx := context.Background()
+
+	identity0, identity1, conn0, conn1 := testPair(t)
+
+	opts := &SessionOptions{}
+
+	sess0 := identity0.NewSession(identity1, conn0, &testLogger{t}, opts)
+	sess0.SetHandlerFuncs(MessageTypeChannel(0), func(i []byte) error {
+		return nil
+	}, func(err error) {
+		return
+	})
+	err := sess0.Start(ctx)
+	require.NoError(t, err)
+
+	sess1 := identity1.NewSession(identity0, conn1, &testLogger{t}, opts)
+	sess1.SetHandlerFuncs(MessageTypeChannel(0), func(i []byte) error {
+		return nil
+	}, func(err error) {
+		return
+	})
+	err = sess1.Start(ctx)
+	require.NoError(t, err)
+
+	sess0.CloseAndWait()
+	sess1.CloseAndWait()
+}
+
+func TestSession_StartClose(t *testing.T) {
+	ctx := context.Background()
+
+	identity0, identity1, conn0, conn1 := testPair(t)
+	conn1.Close()
+
+	opts := &SessionOptions{}
+
+	sess0 := identity0.NewSession(identity1, conn0, &testLogger{t}, opts)
+	sess0.SetHandlerFuncs(MessageTypeChannel(0), func(i []byte) error {
+		return nil
+	}, func(err error) {
+		return
+	})
+	require.NoError(t, sess0.Start(ctx))
+	require.Error(t, sess0.Start(ctx))
+	require.NoError(t, sess0.Close())
+	require.Error(t, sess0.Start(ctx))
+	require.Error(t, sess0.Close())
 }

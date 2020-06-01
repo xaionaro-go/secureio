@@ -45,7 +45,7 @@ type Identity struct {
 	cryptoRandReader io.Reader
 }
 
-/*func start() {
+/*func Start() {
 	switch runtime.GOOS {
 	case "linux":
 		devRandom, err := os.Open(`/dev/random`)
@@ -250,15 +250,16 @@ func (i *Identity) prepareKeys(keysDir string) error {
 // Nothing else should write-to or/and read-from the `backend` while
 // the session is active.
 //
+// The session will not work until method Start() will be called.
+//
 // See `Session`.
 func (i *Identity) NewSession(
-	ctx context.Context,
 	remoteIdentity *Identity,
 	backend io.ReadWriteCloser,
 	eventHandler EventHandler,
 	opts *SessionOptions,
 ) *Session {
-	return newSession(ctx, i, remoteIdentity, backend, eventHandler, opts)
+	return newSession(i, remoteIdentity, backend, eventHandler, opts)
 }
 
 // MutualConfirmationOfIdentity is a helper which creates a temporary
@@ -279,6 +280,7 @@ func (i *Identity) MutualConfirmationOfIdentity(
 	backend io.ReadWriteCloser,
 	eventHandler EventHandler,
 	options *SessionOptions,
+	onStartFunc func(sess *Session) error,
 ) (ephemeralKeys [][]byte, returnError error) {
 	var opts SessionOptions
 	if options != nil {
@@ -290,7 +292,6 @@ func (i *Identity) MutualConfirmationOfIdentity(
 	opts.KeyExchangerOptions.AnswersMode = KeyExchangeAnswersModeAnswerAndWait
 
 	sess := newSession(
-		ctx,
 		i,
 		remoteIdentity,
 		backend,
@@ -309,12 +310,24 @@ func (i *Identity) MutualConfirmationOfIdentity(
 		}),
 		&opts,
 	)
+	if onStartFunc != nil {
+		err := onStartFunc(sess)
+		if err != nil {
+			returnError = xerrors.Errorf(`got an error from onStartFunc: %w`, err)
+			return
+		}
+	}
+	err := sess.Start(ctx)
+	if err != nil {
+		returnError = xerrors.Errorf(`unable to start the session: %w`, err)
+		return
+	}
 	defer func() {
 		_ = sess.Close()
 		sess.WaitForClosure()
 	}()
 
-	_, err := sess.Write(nil)
+	_, err = sess.Write(nil)
 	if err != nil {
 		returnError = xerrors.Errorf(`unable to write to the session: %w`, err)
 		return

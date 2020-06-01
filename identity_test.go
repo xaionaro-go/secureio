@@ -75,8 +75,6 @@ func testIdentityMutualConfirmationOfIdentityWithPSKs(t *testing.T, remoteIsKnow
 
 	opts0.KeyExchangerOptions.PSK = psk0
 	opts1.KeyExchangerOptions.PSK = psk1
-	opts0.OnInitFuncs = []OnInitFunc{func(sess *Session) { printLogsOfSession(t, !shouldFail, sess) }}
-	opts1.OnInitFuncs = []OnInitFunc{func(sess *Session) { printLogsOfSession(t, !shouldFail, sess) }}
 	opts0.EnableDebug = true
 	opts1.EnableDebug = true
 
@@ -105,8 +103,12 @@ func testIdentityMutualConfirmationOfIdentityWithPSKs(t *testing.T, remoteIsKnow
 			ctx,
 			identity1,
 			conn0,
-			&testLogger{t, nil},
+			&testLogger{t},
 			opts0,
+			func(sess *Session) error {
+				printLogsOfSession(t, !shouldFail, sess)
+				return nil
+			},
 		)
 	}()
 
@@ -123,8 +125,12 @@ func testIdentityMutualConfirmationOfIdentityWithPSKs(t *testing.T, remoteIsKnow
 			ctx,
 			identity0,
 			conn1,
-			&testLogger{t, nil},
+			&testLogger{t},
 			opts1,
+			func(sess *Session) error {
+				printLogsOfSession(t, !shouldFail, sess)
+				return nil
+			},
 		)
 	}()
 
