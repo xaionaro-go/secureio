@@ -30,14 +30,28 @@ func newMessenger(msgType MessageType, sess *Session) *Messenger {
 	return messenger
 }
 
-// Write sends a message of MessageType assigned to the Messenger
+// Write sends the message of MessageType assigned to the Messenger
 // through the Session of this Messenger in the synchronous way.
+//
+// See also (*Session).WriteMessage
 func (messenger *Messenger) Write(p []byte) (int, error) {
 	return messenger.sess.WriteMessage(messenger.messageType, p)
 }
 
+// WriteSingle sends the message of MessageType assigned to the Messenger
+// (see `(*Session).NewMessenger`) through the Session of this Messenger
+// in the synchronous way and without messages aggregation
+// (with effectively disabled send-delay, see `SessionOptions.SendDelay`).
+//
+// See also (*Session).WriteMessageSingle
+func (messenger *Messenger) WriteSingle(p []byte) (int, error) {
+	return messenger.sess.WriteMessageSingle(messenger.messageType, p)
+}
+
 // WriteAsync sends a message of MessageType assigned to the Messenger
 // through the Session of this Messenger in the asynchronous way.
+//
+// See also (*Session).WriteMessageAsync
 func (messenger *Messenger) WriteAsync(p []byte) *SendInfo {
 	return messenger.sess.WriteMessageAsync(messenger.messageType, p)
 }

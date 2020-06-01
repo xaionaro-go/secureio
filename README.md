@@ -173,6 +173,76 @@ window of values. If it was received a packet with the same `PacketID` (as it al
 with a lesser `PackerID` (than the minimal possible value in the window) then the packet
 is just ignored.
 
+# Session states
+
+A successful session with the default settings goes through
+states/phases/stages:
+
+* Initialization
+* Key exchanging
+* Negotiation
+* Established
+* Closing
+* Closed
+
+### Initialization
+
+This is the stage where all the options are parsed and all the required
+goroutines are being initialized. After preparing everything to switch into
+"Key exchanging" phase, but right before just doing so, `*Session` calls
+`OnInit` method of `EventHandler` (if it is not `nil`) and `OnInitFuncs`
+functions of `SessionOptions`.
+
+After that `*Session` will be switched to the "Key Exchanging" state.
+
+### Key exchanging
+
+At this stage both parties (the local one and the remote one) are exchanging
+with ECDH public keys to get a symmetrical shared key (see "Security Design").
+
+Also if a remote identity is set then we verify if it matches, and ignores
+any key-exchange messages with any other ED25519 public keys (don't confuse
+with ECDH public key): ED25519 keypairs are static for each party (and usually
+pre-defined), while ECDH keypairs are generated for each key exchange.
+
+Also each key-exchanging key is verified by the public key (passed with
+the message).
+
+With the default settings, each party also sends acknowledgement messages
+to verify if the messages was received and percieved.
+And (with the default settings) each party waits for a acknowledgment message
+from the remote side (see also `SessionOptions.AnswersMode`).
+
+If everything is successful here then the `*Session` goes to the "Negotiation"
+phase. But the key exchanging process is still periodically performed in
+background.
+
+### Negotiation
+
+At this stage we try to determine which size of packets the underlying
+`io.Writer` can handle. So we try to send packets of 3 different sizes and
+look which of them will be able to make a round trip. Then repeat the
+procedure in a shorter interval. And so on up to 4 times.
+
+This behavior could be enabled or disabled through
+`SessionOptions.NegotiatorOptions.Enable`.
+
+When this procedure will be finished (or if it is disabled), then
+the `*Session` is switched to the state "Established".
+
+### Established
+
+This is the state in which the `*Session` is operating normally, so you
+may send and receive messages through it. And messages attempted to be sent
+before reaching this stage will be sent as soon as `*Session` will reach this
+stage.
+
+### Closing / Closed
+
+`Closing` is a transitional state before becoming `Closed`.
+If state `Closed` is reached it means the session is dead and nothing
+will ever happen to it anymore.
+
 # TODO
 
 * support of fragmented/merged (by backend) traffic.

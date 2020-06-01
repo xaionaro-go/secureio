@@ -38,9 +38,9 @@ func TestSessionBigWrite(t *testing.T) {
 	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
 	sess1 := identity1.NewSession(ctx, identity0, conn1, &testLogger{t, nil}, opts)
 
-	writeBuf := make([]byte, sess0.GetMaxPayloadSize())
+	writeBuf := make([]byte, sess0.GetPayloadSizeLimit())
 	rand.Read(writeBuf)
-	readBuf := make([]byte, sess0.GetMaxPayloadSize())
+	readBuf := make([]byte, sess0.GetPayloadSizeLimit())
 
 	_, err := sess0.Write(writeBuf)
 	assert.NoError(t, err)
@@ -125,12 +125,12 @@ func TestSessionAsyncWrite(t *testing.T) {
 
 	var wg sync.WaitGroup
 
-	writeBuf := make([]byte, sess0.GetMaxPayloadSize()/4)
+	writeBuf := make([]byte, sess0.GetPayloadSizeLimit()/4)
 	rand.Read(writeBuf)
 
 	for i := 0; i < 10; i++ {
 		func() {
-			readBuf := make([]byte, sess0.GetMaxPayloadSize()/4)
+			readBuf := make([]byte, sess0.GetPayloadSizeLimit()/4)
 
 			wg.Add(1)
 			go func() {
@@ -239,7 +239,7 @@ func benchmarkSessionWriteRead(
 	var opts *SessionOptions
 	if maxPayloadSize > 0 {
 		opts = &SessionOptions{
-			MaxPayloadSize: uint32(maxPayloadSize),
+			PayloadSizeLimit: uint32(maxPayloadSize),
 		}
 	}
 
@@ -383,7 +383,7 @@ func TestHackerDuplicateMessage(t *testing.T) {
 	// So we will be able to read from `conn1` to intercept a message.
 	assert.NoError(t, sess1.SetPause(true))
 
-	msgSize := sess0.GetMaxPayloadSize()
+	msgSize := sess0.GetPayloadSizeLimit()
 
 	// Now sess1 is paused (does not listen for traffic
 	// and now we can intercept it), so sending a message:
@@ -393,11 +393,11 @@ func TestHackerDuplicateMessage(t *testing.T) {
 	assert.NoError(t, err)
 
 	// And intercepting it:
-	interceptedMessage := make([]byte, sess1.GetMaxPacketSize()+1)
+	interceptedMessage := make([]byte, sess1.GetPacketSizeLimit()+1)
 	conn1.SetReadDeadline(time.Now().Add(time.Hour * 24 * 365))
 	for {
 		n, err := conn1.Read(interceptedMessage)
-		if !assert.Less(t, n, int(sess1.GetMaxPacketSize())+1) {
+		if !assert.Less(t, n, int(sess1.GetPacketSizeLimit())+1) {
 			return
 		}
 		if !assert.NoError(t, err) {
@@ -564,7 +564,7 @@ func TestSession_WriteMessageTooBig(t *testing.T) {
 	}
 
 	sess0 := identity0.NewSession(ctx, identity1, conn0, &testLogger{t, nil}, opts)
-	writeBuf := make([]byte, sess0.GetMaxPayloadSize()*2)
+	writeBuf := make([]byte, sess0.GetPayloadSizeLimit()*2)
 	rand.Read(writeBuf)
 
 	_, err := sess0.Write(writeBuf)

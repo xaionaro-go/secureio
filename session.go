@@ -16,6 +16,7 @@ import (
 	"unsafe"
 
 	"github.com/aead/chacha20/chacha"
+	"github.com/xaionaro-go/udpnofrag"
 	"golang.org/x/crypto/poly1305"
 
 	xerrors "github.com/xaionaro-go/errors"
@@ -98,16 +99,18 @@ func (sessID *SessionID) FillFromBytes(b []byte) {
 type Session struct {
 	locker lockerRWMutex
 
-	id             SessionID
-	ctx            context.Context
-	cancelFunc     context.CancelFunc
-	state          *sessionStateStorage
-	identity       *Identity
-	remoteIdentity *Identity
-	options        SessionOptions
-	maxPacketSize  uint32
+	id                     SessionID
+	ctx                    context.Context
+	cancelFunc             context.CancelFunc
+	state                  *sessionStateStorage
+	identity               *Identity
+	remoteIdentity         *Identity
+	options                SessionOptions
+	packetSizeLimit        uint32
+	establishedPayloadSize uint32
 
 	keyExchanger         *keyExchanger
+	negotiator           *negotiator
 	backend              io.ReadWriteCloser
 	messenger            map[MessageType]*Messenger
 	readChan             map[MessageType]chan *readItem
@@ -117,6 +120,7 @@ type Session struct {
 	waitForCipherKeyChan chan struct{}
 	eventHandler         EventHandler
 	stopWaitGroup        sync.WaitGroup
+	isEstablished        chan struct{}
 
 	bufferPool                   *bufferPool
 	sendInfoPool                 *sendInfoPool
@@ -135,6 +139,7 @@ type Session struct {
 
 	lastSendInfoSendID uint64
 
+	keyExchangeCount            uint64
 	sentMessagesCount           uint64
 	receivedMessagesCount       uint64
 	sequentialDecryptFailsCount uint64
@@ -194,6 +199,10 @@ type SessionOptions struct {
 	//
 	// If it is set to zero (`&[]time.Duration{0}[0]`) then no delay
 	// will be performed and all messages will be sent right away.
+	//
+	// If you disable this option then you probably also would like
+	// to disable the negotiator,
+	// see `SessionOptions.NegotiatorOptions.Disable`.
 	SendDelay *time.Duration
 
 	// DetachOnMessagesCount is an amount of incoming messages after which
@@ -227,12 +236,23 @@ type SessionOptions struct {
 	// See the description of fields of KeyExchangerOptions.
 	KeyExchangerOptions KeyExchangerOptions
 
-	// MaxPayloadSize defines the maximal size of a messages passed
+	// PayloadSizeLimit defines the maximal size of a messages passed
 	// through the Session. The more this value is the more memory is consumed
 	// and the larger payloads will be send through the underlying io.Writer.
-	MaxPayloadSize uint32
+	//
+	// A whole packet (to be sent through the underlying io.Writer) will
+	// be bigger (on size messagesContainerHeadersSize + messageHeadersSize).
+	//
+	// See also NegotiatorOptions.Disable.
+	PayloadSizeLimit uint32
 
-	// OnInitFuncs are the function which will be called right before start
+	// NegotiatorOptions is the structure with options related only
+	// to the negotiation process. The negotiation process follows
+	// after key-exchanging and called upon to find optimal settings
+	// to communicate through given underlying io.ReadWriteCloser.
+	NegotiatorOptions NegotiatorOptions
+
+	// OnInitFuncs are the function which will be called right before Start
 	// the Session (but after performing the self-configuration).
 	OnInitFuncs []OnInitFunc
 
@@ -354,11 +374,32 @@ func newSession(
 	eventHandler EventHandler,
 	opts *SessionOptions,
 ) *Session {
+	sess := &Session{}
+
+	sess.init(
+		ctx,
+		identity, remoteIdentity,
+		backend,
+		eventHandler,
+		opts,
+	)
+
+	panicIf(sess.start())
+	return sess
+}
+
+func (sess *Session) init(
+	ctx context.Context,
+	identity, remoteIdentity *Identity,
+	backend io.ReadWriteCloser,
+	eventHandler EventHandler,
+	opts *SessionOptions,
+) {
 	if eventHandler == nil {
 		eventHandler = &dummyEventHandler{}
 	}
 
-	sess := &Session{
+	*sess = Session{
 		id:                   globalSessionIDGetter.Get(),
 		identity:             identity,
 		remoteIdentity:       remoteIdentity,
@@ -370,6 +411,7 @@ func newSession(
 		cipherKeys:           &[][][]byte{nil}[0],
 		messenger:            make(map[MessageType]*Messenger),
 		readChan:             make(map[MessageType]chan *readItem),
+		isEstablished:        make(chan struct{}),
 	}
 
 	sess.ctx, sess.cancelFunc = context.WithCancel(ctx)
@@ -406,13 +448,16 @@ func newSession(
 		sess.receivedPacketIDs = newPacketIDStorage(storageSize)
 	}
 
-	if sess.options.MaxPayloadSize == 0 {
-		sess.options.MaxPayloadSize = atomic.LoadUint32(&maxPayloadSize)
+	if sess.options.PayloadSizeLimit == 0 {
+		if IsLossyWriter(sess.backend) {
+			sess.options.PayloadSizeLimit = atomic.LoadUint32(&payloadLossySizeLimit)
+		} else {
+			sess.options.PayloadSizeLimit = atomic.LoadUint32(&payloadSizeLimit)
+		}
 	}
-	sess.maxPacketSize = sess.GetMaxPayloadSize() +
-		uint32(messagesContainerHeadersSize) +
-		uint32(messageHeadersSize)
-	sess.bufferPool = newBufferPool(uint(sess.GetMaxPacketSize()))
+	sess.updatePacketSizeLimit()
+	sess.bufferPool = newBufferPool(uint(sess.GetPacketSizeLimit()))
+	sess.establishedPayloadSize = sess.options.PayloadSizeLimit
 
 	sess.delayedWriteBuf = sess.bufferPool.AcquireBuffer()
 	sess.delayedWriteBuf.Bytes = sess.delayedWriteBuf.Bytes[:0]
@@ -439,16 +484,13 @@ func newSession(
 	}
 
 	sess.setupBackend()
-
-	panicIf(sess.init())
-	return sess
 }
 
 func (sess *Session) setupBackend() {
 	var err error
 	switch backend := sess.backend.(type) {
 	case *net.UDPConn:
-		err = wrapError(udpSetNoFragment(backend))
+		err = wrapError(udpnofrag.UDPSetNoFragment(backend))
 	}
 	if err != nil {
 		sess.error(err)
@@ -461,21 +503,63 @@ func (sess *Session) getNextPacketID() uint64 {
 	return result
 }
 
-// GetMaxPayloadSize returns the currently configured MaxPayLoadSize
+// GetPayloadSizeLimit returns the currently configured MaxPayLoadSize
 // of this Session.
 //
-// See SessionOptions.MaxPayloadSize
-func (sess *Session) GetMaxPayloadSize() uint32 {
-	return sess.options.MaxPayloadSize
+// See also SessionOptions.PayloadSizeLimit and GetEstablishedPacketSize
+func (sess *Session) GetPayloadSizeLimit() uint32 {
+	return sess.options.PayloadSizeLimit
 }
 
-// GetMaxPacketSize returns the currently configured maximal packet size
+func (sess *Session) updatePacketSizeLimit() {
+	sess.packetSizeLimit = sess.GetPayloadSizeLimit() +
+		uint32(messagesContainerHeadersSize) +
+		uint32(messageHeadersSize)
+	sess.debugf("new max packet size is: %d", sess.packetSizeLimit)
+}
+
+func (sess *Session) setEstablishedPayloadSize(newValue uint32) {
+	sess.debugf("updating the established payload size: %d -> %d",
+		sess.establishedPayloadSize, newValue)
+	atomic.StoreUint32(&sess.establishedPayloadSize, newValue)
+}
+
+// GetPacketSizeLimit returns the currently configured maximal packet size
 // that could be sent through the backend io.ReadWriteCloser.
 //
-// The value is calculated based on SessionOptions.MaxPayloadSize with
+// The value is calculated based on SessionOptions.PayloadSizeLimit with
 // addition of sizes of headers and paddings.
-func (sess *Session) GetMaxPacketSize() uint32 {
-	return sess.maxPacketSize
+//
+// See also GetEstablishedPacketSize
+func (sess *Session) GetPacketSizeLimit() uint32 {
+	return sess.packetSizeLimit
+}
+
+// GetEstablishedPacketSize returns the packet size limit received as result
+// of negotiations. This is the real packet size used for communications.
+//
+// The value is calculated based on GetEstablishedPayloadSize() with
+// addition of sizes of headers and paddings.
+func (sess *Session) GetEstablishedPacketSize() uint32 {
+	return sess.GetEstablishedPayloadSize() +
+		uint32(messagesContainerHeadersSize) +
+		uint32(messageHeadersSize)
+}
+
+// GetEstablishedPayloadSize returns the payload size limit received as result
+// of negotiations. This is the real payload size used for communications.
+func (sess *Session) GetEstablishedPayloadSize() uint32 {
+	switch sess.state.Load() {
+	case SessionStateEstablished:
+		return sess.establishedPayloadSize
+	}
+
+	select {
+	case <-sess.ctx.Done():
+		return 0
+	case <-sess.isEstablished:
+		return sess.establishedPayloadSize
+	}
 }
 
 // ID returns the unique (though the program execution) session ID
@@ -483,11 +567,12 @@ func (sess *Session) ID() SessionID {
 	return sess.id
 }
 
-func (sess *Session) init() error {
+func (sess *Session) start() error {
 	for _, onInitFunc := range sess.options.OnInitFuncs {
 		onInitFunc(sess)
 	}
 	sess.eventHandler.OnInit(sess)
+	sess.initNegotiator()
 	sess.startKeyExchange()
 	sess.startReader()
 	sess.startBackendCloser()
@@ -548,7 +633,7 @@ func (sess *Session) startBackendCloser() {
 
 func (sess *Session) isDone() bool {
 	switch sess.state.Load() {
-	case SessionStateNew, SessionStateKeyExchanging,
+	case SessionStateNew, SessionStateKeyExchanging, SessionStateNegotiating,
 		SessionStateEstablished, SessionStatePaused:
 		return false
 	}
@@ -583,6 +668,7 @@ func (sess *Session) SetPause(newValue bool) (err error) {
 		SessionStateClosing,
 		SessionStateClosed,
 		SessionStateKeyExchanging,
+		SessionStateNegotiating,
 	}
 
 	result := false
@@ -682,9 +768,10 @@ func (sess *Session) checkAndRememberPacketID(packetID uint64) (isOK bool) {
 func (sess *Session) readerLoopCleanup() {
 	sess.debugf("/readerLoop: state:%v isDoneSlow:%v", sess.state.Load(), sess.isDoneSlow())
 
-	if sess.state.Load() != SessionStateKeyExchanging {
+	switch sess.state.Load() {
+	case SessionStateKeyExchanging, SessionStateNegotiating:
 		sess.startClosing()
-	} else {
+	default:
 		sess.setState(SessionStateClosing, SessionStateClosed)
 		sess.cancelFunc()
 	}
@@ -763,18 +850,18 @@ func (sess *Session) readerLoopDecryptError(err error) (shouldContinue bool) {
 func (sess *Session) readerLoop() {
 	defer sess.readerLoopCleanup()
 
-	var inputBuffer = make([]byte, sess.GetMaxPacketSize())
+	var inputBuffer = make([]byte, sess.GetPacketSizeLimit())
 	var decryptedBuffer buffer
-	decryptedBuffer.Grow(uint(sess.GetMaxPacketSize()))
+	decryptedBuffer.Grow(uint(sess.GetPacketSizeLimit()))
 
 	for !sess.isDone() {
 		sess.setIsReading(true)
 		sess.waitForUnpause()
-		sess.ifDebug(func() { sess.debugf("n, err := sess.backend.Read(inputBuffer)") })
+		sess.ifDebug(func() { sess.debugf("readerLoop: n, err := sess.backend.Read(inputBuffer)") })
 		n, err := sess.backend.Read(inputBuffer)
 		sess.setIsReading(false)
 		sess.ifDebug(func() {
-			sess.debugf("/n, err := sess.backend.Read(inputBuffer): %v | %T:%v | %v", n, err, err, sess.state.Load())
+			sess.debugf("readerLoop: /n, err := sess.backend.Read(inputBuffer): %v | %T:%v | %v", n, err, err, sess.state.Load())
 		})
 		if err != nil {
 			if !sess.readerLoopReadError(err) {
@@ -842,7 +929,7 @@ func (sess *Session) processIncomingMessages(
 		}
 
 		var receivedMessagesCount uint64
-		if sess.options.DetachOnMessagesCount > 0 && hdr.Type != messageTypeKeyExchange {
+		if sess.options.DetachOnMessagesCount > 0 && hdr.Type != messageTypeKeyExchange && hdr.Type != messageTypeNegotiation {
 			receivedMessagesCount = atomic.AddUint64(&sess.receivedMessagesCount, 1)
 		}
 
@@ -872,7 +959,7 @@ func (sess *Session) processIncomingMessage(hdr *messageHeadersData, payload []b
 		return
 	}
 
-	item := sess.readItemPool.AcquireReadItem(sess.GetMaxPacketSize())
+	item := sess.readItemPool.AcquireReadItem(sess.GetPacketSizeLimit())
 	item.Data = item.Data[0:hdr.Length]
 	copy(item.Data, payload[0:hdr.Length])
 
@@ -903,7 +990,7 @@ func (sess *Session) tryDecrypt(
 
 		if len(encrypted) < 200 {
 			sess.ifDebug(func() {
-				sess.debugf("decrypted: iv:%v dec:%v enc:%v dec_len:%v cipher_key:%v",
+				sess.debugf("tryDecrypt: decrypted: iv:%v dec:%v enc:%v dec_len:%v cipher_key:%v",
 					iv, decrypted.Bytes[decrypted.Offset:], encrypted, decrypted.Len(), cipherKey)
 			})
 		}
@@ -916,7 +1003,7 @@ func (sess *Session) tryDecrypt(
 		decrypted.Offset += uint(n)
 	}
 	sess.ifDebug(func() {
-		sess.debugf("decrypted headers: err:%v hdr:%+v %v %v %v",
+		sess.debugf("tryDecrypt: decrypted headers: err:%v hdr:%+v %v %v %v",
 			err, &containerHdr.messagesContainerHeadersData, decrypted.Len(), decrypted.Cap(), decrypted.Offset)
 	})
 	if err != nil {
@@ -925,14 +1012,14 @@ func (sess *Session) tryDecrypt(
 
 	err = sess.checkHeadersChecksum(cipherKey, containerHdr)
 	if err != nil {
-		sess.debugf("decrypting: headers checksum did not match (cipherKey == %v): %v",
+		sess.debugf("tryDecrypt: decrypting: headers checksum did not match (cipherKey == %v): %v",
 			cipherKey, err)
 		return false, nil
 	}
 	messagesBytes := decrypted.Bytes[decrypted.Offset:]
 	err = sess.checkMessagesChecksum(cipherKey, containerHdr, messagesBytes)
 	if err != nil {
-		sess.debugf("decrypting: messages checksum did not match (cipherKey == %v): %v",
+		sess.debugf("tryDecrypt: decrypting: messages checksum did not match (cipherKey == %v): %v",
 			cipherKey, err)
 		return false, wrapError(err)
 	}
@@ -1161,6 +1248,22 @@ func (sess *Session) WriteMessage(
 	return 0, err
 }
 
+// WriteMessageSingle synchronously sends a message of MessageType `msgType`
+// as a single message (without merging with other messages, like
+// if `SessionOptions.SendDelay` is negative).
+func (sess *Session) WriteMessageSingle(
+	msgType MessageType,
+	payload []byte,
+) (int, error) {
+	hdr := sess.messageHeadersPool.AcquireMessageHeaders()
+	hdr.Set(msgType, payload)
+	defer hdr.Release()
+
+	hdr.SetIsConfidential(msgType != messageTypeKeyExchange)
+
+	return sess.writeMessageSingle(hdr, payload)
+}
+
 // GetCipherKeys returns the currently active cipher keys.
 // Do not modify it, it's not a copy.
 //
@@ -1204,13 +1307,14 @@ func (sess *Session) WriteMessageAsync(
 	msgType MessageType,
 	payload []byte,
 ) (sendInfo *SendInfo) {
-	defer func() { sess.debugf("WriteMessageAsync() -> %+v", sendInfo) }()
+	defer func() { sess.debugf("/WriteMessageAsync() -> %+v", sendInfo) }()
 
 	// if msgType == messageType_keyExchange or SendDelay is zero then
-	// it will write the message synchronously anyway.
-	if uint32(len(payload)) > sess.GetMaxPayloadSize() {
+	//
+	maxPayloadSize := atomic.LoadUint32(&sess.establishedPayloadSize)
+	if uint32(len(payload)) > maxPayloadSize {
 		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
-		sendInfo.Err = newErrPayloadTooBig(uint(sess.GetMaxPayloadSize()), uint(len(payload)))
+		sendInfo.Err = newErrPayloadTooBig(uint(maxPayloadSize), uint(len(payload)))
 		close(sendInfo.c)
 		return
 	}
@@ -1223,7 +1327,7 @@ func (sess *Session) WriteMessageAsync(
 
 	if !hdr.IsConfidential() || sess.options.SendDelay == nil {
 		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
-		n, err := sess.writeMessageSync(hdr, payload)
+		n, err := sess.writeMessageSingle(hdr, payload)
 		sendInfo.N = n
 		sendInfo.Err = err
 		close(sendInfo.c)
@@ -1233,7 +1337,7 @@ func (sess *Session) WriteMessageAsync(
 	return sess.writeMessageAsync(hdr, payload)
 }
 
-func (sess *Session) writeMessageSync(
+func (sess *Session) writeMessageSingle(
 	hdr *messageHeaders,
 	payload []byte,
 ) (n int, err error) {
@@ -1256,6 +1360,7 @@ func (sess *Session) writeMessageSync(
 
 	return sess.sendMessages(
 		hdr.IsConfidential(),
+		isInternalMessageType(hdr.Type),
 		buf.Bytes,
 	)
 }
@@ -1275,25 +1380,37 @@ func (sess *Session) writeMessageAsync(
 
 	if sess.options.SendDelay == nil {
 		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
-		sendInfo.N, sendInfo.Err = sess.writeMessageSync(hdr, payload)
+		sendInfo.N, sendInfo.Err = sess.writeMessageSingle(hdr, payload)
 		close(sendInfo.c)
 		return
+	}
+
+	if !isInternalMessageType(hdr.Type) && sess.GetState() != SessionStateEstablished {
+		select {
+		case <-sess.ctx.Done():
+			sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
+			sendInfo.Err = newErrAlreadyClosed()
+			close(sendInfo.c)
+			return
+		case <-sess.isEstablished:
+		}
 	}
 
 	for {
 		shouldWaitForSend := false
 		sess.delayedWriteBufLockDo(func(buf *buffer) {
 			packetSize := messagesContainerHeadersSize + uint(len(buf.Bytes)) + messageHeadersSize + uint(len(payload))
-			if packetSize > uint(sess.GetMaxPacketSize()) {
+			maxPacketSize := sess.GetEstablishedPacketSize()
+			if packetSize > uint(maxPacketSize) {
 				if len(buf.Bytes) == 0 {
 					sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
-					sendInfo.Err = newErrPayloadTooBig(uint(sess.GetMaxPacketSize()), packetSize)
+					sendInfo.Err = newErrPayloadTooBig(uint(maxPacketSize), packetSize)
 					close(sendInfo.c)
 					return
 				}
 
 				sess.debugf("no more space left in the buffer, sending now: %v (> %v)",
-					packetSize, sess.GetMaxPacketSize())
+					packetSize, maxPacketSize)
 
 				sendInfo = sess.delayedSendInfo
 				shouldWaitForSend = true
@@ -1406,7 +1523,7 @@ func (sess *Session) appendToDelayedWriteBuffer(
 	return
 }
 
-func (sess *Session) sendDelayedNow() uint64 {
+func (sess *Session) sendDelayedNow() (uint64, uint) {
 	sess.ifDebug(func() { sess.debugf(`sendDelayedNow()`) })
 
 	// This lines should be before `Lock` because nothing
@@ -1438,9 +1555,10 @@ func (sess *Session) sendDelayedNow() uint64 {
 	}
 	close(oldSendInfo.c)
 	oldSendInfo.Release()
+	bufLen := buf.Len()
 	buf.Release()
 
-	return sendID
+	return sendID, bufLen
 }
 
 func (sess *Session) sendDelayedNowSyncFromBuffer(buf *buffer) (int, error) {
@@ -1448,6 +1566,7 @@ func (sess *Session) sendDelayedNowSyncFromBuffer(buf *buffer) (int, error) {
 
 	n, err := sess.sendMessages(
 		true,
+		false,
 		messagesBytes,
 	)
 	if err != nil {
@@ -1499,7 +1618,7 @@ func (sess *Session) delayedSenderLoop() {
 			sess.debugf("delayedSenderLoop(): <-sess.delayedSenderTimer.c")
 		}
 
-		sendID := sess.sendDelayedNow()
+		sendID, _ := sess.sendDelayedNow()
 		if atomic.LoadUint64(&sess.lastSendInfoSendID) > sendID {
 			sess.delayedSenderTimerLocker.LockDo(func() {
 				if !sess.delayedSenderTimer.Stop() {
@@ -1518,6 +1637,7 @@ func (sess *Session) delayedSenderLoop() {
 
 func (sess *Session) sendMessages(
 	isConfidential bool,
+	isInternalMessage bool,
 	messagesBytes []byte,
 ) (int, error) {
 
@@ -1557,7 +1677,20 @@ func (sess *Session) sendMessages(
 	messagesBytesOutStartIdx := messagesContainerHeadersSize
 	messagesBytesOut := buf.Bytes[messagesBytesOutStartIdx:]
 	n := copy(messagesBytesOut, messagesBytes)
-	if n != len(messagesBytes) || uint32(messagesContainerHeadersSize)+uint32(len(messagesBytes)) > sess.GetMaxPacketSize() {
+	if !isInternalMessage {
+		if sess.GetState() != SessionStateEstablished {
+			select {
+			case <-sess.ctx.Done():
+				return 0, newErrAlreadyClosed()
+			case <-sess.isEstablished:
+			}
+		}
+		if uint32(messagesContainerHeadersSize)+uint32(len(messagesBytes)) > sess.GetEstablishedPacketSize() {
+			err = newErrPayloadTooBig(uint(len(messagesBytesOut)), messagesContainerHeadersSize+uint(len(messagesBytes)))
+			return 0, err
+		}
+	}
+	if n != len(messagesBytes) {
 		err = newErrPayloadTooBig(uint(len(messagesBytesOut)), messagesContainerHeadersSize+uint(len(messagesBytes)))
 		return 0, err
 	}
@@ -1669,6 +1802,68 @@ func (sess *Session) GetRemoteIdentity() (result *Identity) {
 	return
 }
 
+func (sess *Session) onConnect() {
+	defer sess.debugf("/onConnect()")
+
+	sess.setState(SessionStateEstablished,
+		SessionStateClosed, SessionStateClosing,
+		SessionStateNew, SessionStateEstablished)
+
+	close(sess.isEstablished)
+
+	sess.eventHandler.OnConnect(sess)
+
+	sess.debugf("established! sess.sendDelayedNow()")
+	for {
+		if _, l := sess.sendDelayedNow(); l == 0 {
+			break
+		}
+		sess.debugf("something was sent on sess.sendDelayedNow()")
+	}
+	if sess.options.SendDelay != nil {
+		sess.startDelayedSender()
+	}
+}
+
+func (sess *Session) initNegotiator() {
+	sess.negotiator = newNegotiator(
+		sess.ctx,
+		sess.NewMessenger(messageTypeNegotiation),
+		sess.options.NegotiatorOptions,
+		sess.onConnect,
+		func(err error) {
+			// got error
+			_ = sess.Close()
+			sess.eventHandler.Error(sess, wrapError(err))
+		},
+	)
+}
+
+func (sess *Session) onKeyExchangeSuccess() {
+	if atomic.AddUint64(&sess.keyExchangeCount, 1) != 1 {
+		return
+	}
+
+	sess.setState(SessionStateNegotiating,
+		SessionStateClosed, SessionStateClosing,
+		SessionStateNew, SessionStateEstablished, SessionStateNegotiating)
+
+	err := sess.negotiator.Start()
+	if err != nil {
+		sess.error(err)
+	}
+}
+
+func (sess *Session) onReceiveSecrets(secrets [][]byte) {
+	if !sess.setSecrets(secrets) {
+		// The same key as it was. Nothing to do.
+		sess.debugf("got keys: the same as they were: %v", secrets)
+		return
+	}
+
+	sess.debugf("got keys: new keys: %v", secrets)
+}
+
 func (sess *Session) startKeyExchange() {
 	switch sess.setState(SessionStateKeyExchanging, SessionStateClosing, SessionStateClosed) {
 	case SessionStateKeyExchanging, SessionStateClosing, SessionStateClosed:
@@ -1677,43 +1872,14 @@ func (sess *Session) startKeyExchange() {
 
 	sess.stopWaitGroup.Add(1)
 
-	var keyExchangeCount uint64
 	sess.keyExchanger = newKeyExchanger(
 		sess.ctx,
 		sess.identity,
 		sess.remoteIdentity,
 		sess.NewMessenger(messageTypeKeyExchange),
-		func(secrets [][]byte) {
-			// set secret function
-
-			if !sess.setSecrets(secrets) {
-				// The same key as it was. Nothing to do.
-				sess.debugf("got keys: the same as they were: %v", secrets)
-				return
-			}
-
-			sess.debugf("got keys: new keys: %v", secrets)
-		},
-		func() {
-			// "done" function
-
-			if atomic.AddUint64(&keyExchangeCount, 1) != 1 {
-				return
-			}
-
-			sess.setState(SessionStateEstablished,
-				SessionStateClosed, SessionStateClosing,
-				SessionStateNew, SessionStateEstablished)
-
-			sess.eventHandler.OnConnect(sess)
-
-			sess.debugf("keyexchange: sess.sendDelayedNow()")
-			for sess.sendDelayedNow() == 0 {
-			}
-			if sess.options.SendDelay != nil {
-				sess.startDelayedSender()
-			}
-		}, func(err error) {
+		sess.onReceiveSecrets,
+		sess.onKeyExchangeSuccess,
+		func(err error) {
 			// got error
 			_ = sess.Close()
 			sess.eventHandler.Error(sess, wrapError(err))
@@ -1812,11 +1978,7 @@ func (sess *Session) Write(p []byte) (int, error) {
 }
 
 func (sess *Session) setBackendReadDeadline(deadline time.Time) (err error) {
-	defer func() {
-		if err != nil {
-			err = wrapError(err)
-		}
-	}()
+	defer func() { err = wrapError(err) }()
 
 	if setReadDeadliner, ok := sess.backend.(interface{ SetReadDeadline(time.Time) error }); ok {
 		err = setReadDeadliner.SetReadDeadline(deadline)
@@ -1838,11 +2000,7 @@ func (sess *Session) setBackendReadDeadline(deadline time.Time) (err error) {
 }
 
 func (sess *Session) interruptRead() (err error) {
-	defer func() {
-		if err != nil {
-			err = wrapError(err)
-		}
-	}()
+	defer func() { err = wrapError(err) }()
 	if !sess.isReading() {
 		return nil
 	}
@@ -1855,6 +2013,8 @@ func (sess *Session) interruptRead() (err error) {
 }
 
 func (sess *Session) startClosing() {
+	defer sess.debugf("/startClosing()")
+
 	go func() {
 		select {
 		case <-time.After(sess.keyExchanger.options.Timeout):
@@ -1862,7 +2022,11 @@ func (sess *Session) startClosing() {
 		case <-sess.ctx.Done():
 		}
 	}()
-	for sess.sendDelayedNow() == 0 {
+	for {
+		if _, l := sess.sendDelayedNow(); l == 0 {
+			break
+		}
+		sess.debugf("something was sent on sess.sendDelayedNow()")
 	}
 	sess.cancelFunc()
 }

@@ -45,7 +45,7 @@ type Identity struct {
 	cryptoRandReader io.Reader
 }
 
-/*func init() {
+/*func start() {
 	switch runtime.GOOS {
 	case "linux":
 		devRandom, err := os.Open(`/dev/random`)
@@ -60,7 +60,7 @@ type Identity struct {
 //
 // * Parses ED25519 keys from directory `keysDir` if they exists
 // and creates a new instance of `*Identity`.
-// * Creates ED25510 keys and saves them to the directory `keysDir` if they
+// * Creates ED25519 keys and saves them to the directory `keysDir` if they
 // does not exist there and creates a new instance of `*Identity`.
 //
 // File names in the directory are `id_ed25519` and `id_ed25519.pub`.
@@ -286,8 +286,7 @@ func (i *Identity) MutualConfirmationOfIdentity(
 	}
 
 	// Detach from `backend` right after the first authentication message.
-	opts.DetachOnSequentialDecryptFailsCount = 1
-	opts.DetachOnMessagesCount = 1
+	opts.DetachOnSequentialDecryptFailsCount = 2
 	opts.KeyExchangerOptions.AnswersMode = KeyExchangeAnswersModeAnswerAndWait
 
 	sess := newSession(
@@ -303,7 +302,9 @@ func (i *Identity) MutualConfirmationOfIdentity(
 				}
 			}
 			sess.debugf(`closing the backend due to %v`, err)
-			_ = sess.Close()
+			if closeErr := sess.Close(); closeErr != nil {
+				sess.debugf(`unable to close the session: %v`, closeErr)
+			}
 			return false
 		}),
 		&opts,

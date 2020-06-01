@@ -25,22 +25,27 @@ const (
 )
 
 var (
-	maxPayloadSize uint32
+	payloadSizeLimit      uint32
+	payloadLossySizeLimit uint32
 )
 
 func init() {
-	SetMaxPayloadSize(uint32(maxPossiblePacketSize - messagesContainerHeadersSize - messageHeadersSize))
+	SetPayloadSizeLimit(uint32(maxPossiblePacketSize - messagesContainerHeadersSize - messageHeadersSize))
+	SetPayloadLossySizeLimit(uint32(1500 - 48 - messagesContainerHeadersSize - messageHeadersSize)) // 48 == 40 + 8: IPv6 headers + UDP headers
 }
 
-// SetMaxPayloadSize sets the default MaxPayloadSize.
-//
-// MaxPayloadSize is used to calculate the size of the buffers to be
-// used to handle the communication. So you cannot send/read a message
-// via a session larger than session's MaxPayloadSize
-// (see `GetMaxPayloadSize`).
-func SetMaxPayloadSize(newSize uint32) {
+// SetPayloadSizeLimit sets the default PayloadSizeLimit is the backend
+// is not considered lossy (see IsLossyWriter).
+func SetPayloadSizeLimit(newSize uint32) {
 	newSize &= ^(uint32(aes.BlockSize) - 1)
-	atomic.StoreUint32(&maxPayloadSize, newSize)
+	atomic.StoreUint32(&payloadSizeLimit, newSize)
+}
+
+// SetPayloadLossySizeLimit sets the default PayloadSizeLimit is the backend
+// is considered lossy (see IsLossyWriter).
+func SetPayloadLossySizeLimit(newSize uint32) {
+	newSize &= ^(uint32(aes.BlockSize) - 1)
+	atomic.StoreUint32(&payloadLossySizeLimit, newSize)
 }
 
 var (
@@ -54,6 +59,7 @@ type MessageType uint32
 const (
 	messageTypeUndefined   = MessageType(0)
 	messageTypeKeyExchange = MessageType(^uint32(0) - iota)
+	messageTypeNegotiation
 
 	// MessageTypeReadWrite is the default MessageType for
 	// the in-band data. It used by default for (*Session).Read and
@@ -75,6 +81,14 @@ const (
 	messageTypeReserved14
 	messageTypeReservedAbove
 )
+
+func isInternalMessageType(msgType MessageType) bool {
+	switch msgType {
+	case messageTypeKeyExchange, messageTypeNegotiation:
+		return true
+	}
+	return false
+}
 
 // MessageTypeChannel returns MessageType for multiplexer.
 // See (*Session).SetHandlerFuncs.

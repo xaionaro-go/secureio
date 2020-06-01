@@ -11,7 +11,7 @@ type SessionState uint64
 
 const (
 	// SessionStateNew means the Session was just created and even
-	// did not start it's routines.
+	// did not Start it's routines.
 	SessionStateNew = SessionState(iota)
 
 	// SessionStateClosed means the session is already deattached from
@@ -19,10 +19,16 @@ const (
 	SessionStateClosed
 
 	// SessionStateKeyExchanging is the state which follows after
-	// SessionStateNew. it means the Session started it's routines
+	// SessionStateNew. It means the Session started it's routines
 	// (including the key exchanger routine), but not yet successfully
 	// exchanged with keys (at least once).
 	SessionStateKeyExchanging
+
+	// SessionStateNegotiating is the state which follows after
+	// SessionStateKeyExchanging. It means the Session is performing
+	// experiments to find the optimal settings for further
+	// communications.
+	SessionStateNegotiating
 
 	// SessionStateEstablished means the Session successfully exchanged
 	// with keys and currently operational.
@@ -58,6 +64,8 @@ func (state SessionState) String() string {
 		return `closed`
 	case SessionStateKeyExchanging:
 		return `key_exchanging`
+	case SessionStateNegotiating:
+		return `negotiating`
 	case SessionStateEstablished:
 		return `established`
 	case SessionStatePaused:

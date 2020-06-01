@@ -68,6 +68,20 @@ const (
 	secretIDs = int(_secretIDs)
 )
 
+func (secretID secretID) String() string {
+	switch secretID {
+	case secretIDRecentBoth:
+		return "recent_both"
+	case secretIDRecentLocal:
+		return "recent_local"
+	case secretIDRecentRemote:
+		return "recent_remote"
+	case secretIDPrevious:
+		return "previous"
+	}
+	return fmt.Sprintf("%d", secretID)
+}
+
 type keyExchanger struct {
 	locker sync.RWMutex
 
@@ -242,19 +256,45 @@ func (kx *keyExchanger) LockDo(fn func()) {
 	fn()
 }
 
-func (kx *keyExchanger) generateSharedKey(
-	localPrivateKey *[curve25519PrivateKeySize]byte,
-	remotePublicKey *[curve25519PublicKeySize]byte,
+func (kx *keyExchanger) generateSharedKeyBySecretID(
+	secretID secretID,
 ) (sharedKey []byte, err *xerrors.Error) {
 	defer func() {
 		if err != nil {
 			err.SetFormat(xerrors.FormatOneLine)
 		}
 		if kx.messenger != nil {
-			kx.messenger.sess.debugf("[kx] generatedSharedKey() -> %v, %v", sharedKey, err)
+			kx.messenger.sess.debugf("[kx] generateSharedKeyBySecretID(%v) -> %v, %v",
+				secretID, sharedKey, err)
 		}
 	}()
 
+	var localPrivateKey *[curve25519PrivateKeySize]byte
+	var remotePublicKey *[curve25519PublicKeySize]byte
+	kx.keyLocker.RLockDo(func() {
+		switch secretID {
+		case secretIDRecentBoth:
+			localPrivateKey = kx.nextLocalPrivateKey
+			remotePublicKey = kx.nextRemotePublicKey
+		case secretIDRecentLocal:
+			localPrivateKey = kx.nextLocalPrivateKey
+			remotePublicKey = kx.prevRemotePublicKey
+		case secretIDRecentRemote:
+			localPrivateKey = kx.prevLocalPrivateKey
+			remotePublicKey = kx.nextRemotePublicKey
+		case secretIDPrevious:
+			localPrivateKey = kx.prevLocalPrivateKey
+			remotePublicKey = kx.prevRemotePublicKey
+		}
+	})
+
+	return kx.generateSharedKey(localPrivateKey, remotePublicKey)
+}
+
+func (kx *keyExchanger) generateSharedKey(
+	localPrivateKey *[curve25519PrivateKeySize]byte,
+	remotePublicKey *[curve25519PublicKeySize]byte,
+) (sharedKey []byte, err *xerrors.Error) {
 	if localPrivateKey == nil {
 		return nil, newErrLocalPrivateKeyIsNil()
 	}
@@ -282,31 +322,9 @@ func (kx *keyExchanger) generateSharedKey(
 func (kx *keyExchanger) updateSecrets() (err error) {
 	defer func() { err = wrapError(err) }()
 
-	var prevRemote *[curve25519PublicKeySize]byte
-	var nextRemote *[curve25519PublicKeySize]byte
-	var prevLocal *[curve25519PrivateKeySize]byte
-	var nextLocal *[curve25519PrivateKeySize]byte
-	kx.keyLocker.RLockDo(func() {
-		prevRemote = kx.prevRemotePublicKey
-		nextRemote = kx.nextRemotePublicKey
-		prevLocal = kx.prevLocalPrivateKey
-		nextLocal = kx.nextLocalPrivateKey
-	})
-
 	newSecrets := make([][]byte, secretIDs)
 	for secretIdx := 0; secretIdx < secretIDs; secretIdx++ {
-		var genErr *xerrors.Error
-		var newSecret []byte
-		switch secretID(secretIdx) {
-		case secretIDRecentBoth:
-			newSecret, genErr = kx.generateSharedKey(nextLocal, nextRemote)
-		case secretIDRecentLocal:
-			newSecret, genErr = kx.generateSharedKey(nextLocal, prevRemote)
-		case secretIDRecentRemote:
-			newSecret, genErr = kx.generateSharedKey(prevLocal, nextRemote)
-		case secretIDPrevious:
-			newSecret, genErr = kx.generateSharedKey(prevLocal, prevRemote)
-		}
+		newSecret, genErr := kx.generateSharedKeyBySecretID(secretID(secretIdx))
 		if genErr != nil &&
 			!genErr.Has(errLocalPrivateKeyIsNil{}) &&
 			!genErr.Has(errRemotePublicKeyIsNil{}) {
@@ -422,13 +440,17 @@ func (kx *keyExchanger) Handle(b []byte) (err error) {
 	kx.messenger.sess.debugf("[kx] received msg: %+v", msg)
 
 	kx.LockDo(func() {
+		defer func() { err = wrapError(err) }()
+
+		kx.messenger.sess.debugf("[kx] received msg: locked")
+		defer kx.messenger.sess.debugf("[kx] received msg: unlocked")
+
 		select {
 		case <-kx.ctx.Done():
 			err = newErrAlreadyClosed()
 			return
 		default:
 		}
-		defer func() { err = wrapError(err) }()
 
 		if kx.remoteIdentity == nil {
 			if !kx.setRemoteIdentityFromPublicKey(b, msg.IdentityPublicKey[:]) {
@@ -505,7 +527,7 @@ func (kx *keyExchanger) stop() {
 }
 
 func (kx *keyExchanger) start() {
-	kx.messenger.sess.debugf("[kx] kx.start()")
+	kx.messenger.sess.debugf("[kx] kx.Start()")
 	kx.wg.Add(1)
 	go func() {
 		defer kx.wg.Done()

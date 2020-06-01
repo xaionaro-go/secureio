@@ -36,6 +36,10 @@ func TestErrTypes(t *testing.T) {
 		newErrRemotePublicKeyIsNil(),
 		newErrRemoteKeyHasNotChanged(),
 		newErrInvalidPublicKey(),
+		newErrNegotiationTimeout("unit-test"),
+		newErrNegotiationCancelled("unit-test"),
+		newErrAlreadyStarted(),
+		newErrUnknownSubType(-1),
 	} {
 		_ = err.Error() // check if there's no panic
 

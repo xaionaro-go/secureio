@@ -202,7 +202,7 @@ func (err ErrInvalidChecksum) Error() string {
 
 // ErrPayloadTooBig means there was an attempt to use more buffer
 // space than it was reserved. The size of a message should not
-// exceed (*Session).GetMaxPayloadSize() bytes.
+// exceed (*Session).GetPayloadSizeLimit() bytes.
 type ErrPayloadTooBig struct {
 	MaxSize  uint
 	RealSize uint
@@ -352,13 +352,57 @@ func (err errInvalidPublicKey) Error() string {
 	return fmt.Sprintf("[kx] invalid public key")
 }
 
-type errUnableToLock struct{}
+type errUnknownSubType struct {
+	SubType interface{}
+}
 
-func newErrUnableToLock() error {
-	err := errors.New(errUnableToLock{})
+func newErrUnknownSubType(subType interface{}) error {
+	err := errors.New(errUnknownSubType{SubType: subType})
 	err.Traceback.CutOffFirstNLines += 2
 	return err
 }
-func (err errUnableToLock) Error() string {
-	return fmt.Sprintf("unable to get a lock")
+func (err errUnknownSubType) Error() string {
+	return fmt.Sprintf("unknown subtype: %v", err.SubType)
+}
+
+// errAlreadyStarted is reported on attempt to call method
+// Start() on an object which is already started (and does not
+// support additional calls of `Start()`).
+//
+// It's a possible internal error and should never happen.
+type errAlreadyStarted struct{}
+
+func newErrAlreadyStarted() error {
+	err := errors.New(errAlreadyStarted{})
+	err.Traceback.CutOffFirstNLines += 2
+	return err
+}
+func (err errAlreadyStarted) Error() string {
+	return fmt.Sprintf("already started")
+}
+
+type errNegotiationTimeout struct {
+	Description string
+}
+
+func newErrNegotiationTimeout(description string) error {
+	err := errors.New(errNegotiationTimeout{Description: description})
+	err.Traceback.CutOffFirstNLines += 2
+	return err
+}
+func (err errNegotiationTimeout) Error() string {
+	return fmt.Sprintf("negotiation timeout: %s", err.Description)
+}
+
+type errNegotiationCancelled struct {
+	Description string
+}
+
+func newErrNegotiationCancelled(description string) error {
+	err := errors.New(errNegotiationCancelled{Description: description})
+	err.Traceback.CutOffFirstNLines += 2
+	return err
+}
+func (err errNegotiationCancelled) Error() string {
+	return fmt.Sprintf("negotiation was cancelled: %s", err.Description)
 }

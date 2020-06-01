@@ -16,6 +16,8 @@ import (
 
 func testKeyExchanger(t *testing.T, errFunc func(error)) *keyExchanger {
 	ctx, cancelFunc := context.WithCancel(context.Background())
+	closedChan := make(chan struct{})
+	close(closedChan)
 	kx := &keyExchanger{
 		ctx:        ctx,
 		cancelFunc: cancelFunc,
@@ -30,11 +32,13 @@ func testKeyExchanger(t *testing.T, errFunc func(error)) *keyExchanger {
 			messageHeadersPool:           newMessageHeadersPool(),
 			messagesContainerHeadersPool: newMessagesContainerHeadersPool(),
 			bufferPool:                   newBufferPool(1),
-			maxPacketSize:                maxPossiblePacketSize,
+			packetSizeLimit:              maxPossiblePacketSize,
+			establishedPayloadSize:       maxPossiblePacketSize - 100,
 			waitForCipherKeyChan:         make(chan struct{}),
 			options: SessionOptions{
-				MaxPayloadSize: maxPayloadSize,
+				PayloadSizeLimit: payloadSizeLimit,
 			},
+			isEstablished: closedChan,
 		}},
 		localIdentity:  testIdentity(t),
 		remoteIdentity: testIdentity(t),
