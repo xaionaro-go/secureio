@@ -5,6 +5,7 @@ go 1.13
 require (
 	github.com/aead/chacha20 v0.0.0-20180709150244-8b13a72661da
 	github.com/aead/ecdh v0.2.0
+	github.com/bxcodec/faker v2.0.1+incompatible
 	github.com/mohae/deepcopy v0.0.0-20170929034955-c48cc78d4826
 	github.com/stretchr/testify v1.6.0
 	github.com/xaionaro-go/bytesextra v0.0.0-20200223153815-1ed74f0bfcd8
