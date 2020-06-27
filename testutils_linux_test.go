@@ -29,17 +29,20 @@ testUDPPairStart:
 	if err != nil {
 		goto testUDPPairStart // somebody already took the address
 	}
-	assert.NoError(t, err)
 
-	writeBuf := []byte("abc123")
-	_, err = conn1.Write(writeBuf)
-	assert.NoError(t, err)
-	_, err = conn0.Write(writeBuf)
-	assert.NoError(t, err)
-	readBuf := make([]byte, 65536)
-	n, err := conn0.Read(readBuf)
-	assert.NoError(t, err)
-	assert.Equal(t, writeBuf, readBuf[:n])
+	if t != nil {
+		assert.NoError(t, err)
+
+		writeBuf := []byte("abc123")
+		_, err = conn1.Write(writeBuf)
+		assert.NoError(t, err)
+		_, err = conn0.Write(writeBuf)
+		assert.NoError(t, err)
+		readBuf := make([]byte, 65536)
+		n, err := conn0.Read(readBuf)
+		assert.NoError(t, err)
+		assert.Equal(t, writeBuf, readBuf[:n])
+	}
 
 	return conn0, conn1
 }

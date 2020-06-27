@@ -244,7 +244,6 @@ will ever happen to it anymore.
 # TODO
 
 * support of fragmented/merged (by backend) traffic.
-* support of fragmenting traffic (to split big messages to smaller ones and then merge them back).
 * check keyCreatedAt
 * error if key hasn't changed
 * verify TS difference sanity

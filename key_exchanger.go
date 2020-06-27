@@ -496,10 +496,16 @@ func (kx *keyExchanger) sendSuccessNotifications() {
 	})
 	func() {
 		defer func() {
-			// just in case; TODO: remove this `defer`
+			// TODO: remove this `defer`
+			//       Sometimes it panics with: "panic: send on closed channel"
 			err := recover()
 			if err != nil {
-				kx.errFunc(fmt.Errorf("panic: %s", err))
+				select {
+				case <-kx.ctx.Done():
+					kx.messenger.sess.debugf("panic: %s", err)
+				default:
+					kx.errFunc(fmt.Errorf("panic: %s", err))
+				}
 			}
 		}()
 		select {

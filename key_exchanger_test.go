@@ -30,6 +30,7 @@ func testKeyExchanger(t *testing.T, errFunc func(error)) *keyExchanger {
 			state:                        newSessionStateStorage(),
 			cipherKeys:                   &[][][]byte{nil}[0],
 			messageHeadersPool:           newMessageHeadersPool(),
+			messageFragmentHeadersPool:   newMessageFragmentHeadersPool(),
 			messagesContainerHeadersPool: newMessagesContainerHeadersPool(),
 			bufferPool:                   newBufferPool(1),
 			packetSizeLimit:              maxPossiblePacketSize,

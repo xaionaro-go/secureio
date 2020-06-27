@@ -16,6 +16,7 @@ import (
 	"unsafe"
 
 	"github.com/aead/chacha20/chacha"
+	"github.com/xaionaro-go/multierror"
 	"github.com/xaionaro-go/udpnofrag"
 	"golang.org/x/crypto/poly1305"
 
@@ -49,6 +50,14 @@ const (
 	// the performance penalty is almost absent (the value is
 	// small enough).
 	DefaultPacketIDStorageSize = 256
+
+	// DefaultMaxChainIDDiff is the default value for
+	// SessionOptions.MaxChainIDDiff.
+	DefaultMaxChainIDDiff = 8
+
+	// DefaultMaxFragmentedMessageSize is the default value for
+	// SessionOptions.MaxFragmentedMessageSize.
+	DefaultMaxFragmentedMessageSize = 1 << 16
 )
 
 const (
@@ -126,6 +135,7 @@ type Session struct {
 	sendInfoPool                 *sendInfoPool
 	readItemPool                 *readItemPool
 	messageHeadersPool           *messageHeadersPool
+	messageFragmentHeadersPool   *messageFragmentHeadersPool
 	messagesContainerHeadersPool *messagesContainerHeadersPool
 
 	delayedSendInfo          *SendInfo
@@ -152,6 +162,10 @@ type Session struct {
 
 	receivedPacketIDs *packetIDStorage
 	nextPacketID      uint64
+
+	pendingChains     []pendingChain
+	lastRemoteChainID uint64
+	nextLocalChainID  uint64
 
 	pauseWaitLocker sync.Mutex
 	pauseLocker     spinlock.Locker
@@ -272,6 +286,33 @@ type SessionOptions struct {
 	// The default value (which is forced on a zero value) is
 	// DefaultPacketIDStorageSize.
 	PacketIDStorageSize int
+
+	// EnableFragmentation allows to fragment messages. By default
+	// a message larger than (*Session).GetEstablishedPayloadSize() are not
+	// fragmented (and defragmented on the remote side), an error is returned
+	// instead.
+	EnableFragmentation bool
+
+	// MaxChainIDDiff is the allowed maximum difference between the latest
+	// chain ID and the oldest chain ID (stored in memory). The more this
+	// value is the more memory will be consumed, but more-out-of-order
+	// fragments still will be recognized.
+	//
+	// Each large message (which is larger than
+	// (*Session).GetEstablishedPayloadSize()) is fragmented into smaller
+	// packets (see also EnableFragmentation). These bunch of packets is
+	// called "chain". And if there's a lot of chains and their packets are
+	// received in a wrong order (for example due to properties of UDP) then
+	// a lot of fragments are stored in memory. Moreover some packets
+	// might be lost and we will store some fragments in memory forever.
+	// And to do not consumer infinite amount of memory we limit how old
+	// chains is permitted to keep.
+	MaxChainIDDiff uint64
+
+	// MaxFragmentedMessageSize is the maximum allows size of a message
+	// (after assembling from all its fragments). The more this value is
+	// the larder messages are allowed, but more memory is consumed.
+	MaxFragmentedMessageSize uint64
 }
 
 // GetUnexpectedPacketIDCount returns the amount of packets which were
@@ -309,12 +350,6 @@ func (sess *Session) setState(state SessionState, cancelOnStates ...SessionState
 	oldState = sess.state.Set(state, cancelOnStates...)
 	sess.debugf("setState: %v %v %v", state, cancelOnStates, oldState)
 	return
-}
-
-func panicIf(err error) {
-	if err != nil {
-		panic(err)
-	}
 }
 
 type sessionIDGetterType struct {
@@ -442,6 +477,14 @@ func (sess *Session) init(
 			sess.options.PayloadSizeLimit = atomic.LoadUint32(&payloadSizeLimit)
 		}
 	}
+
+	if sess.options.MaxChainIDDiff == 0 {
+		sess.options.MaxChainIDDiff = DefaultMaxChainIDDiff
+	}
+	if sess.options.MaxFragmentedMessageSize == 0 {
+		sess.options.MaxFragmentedMessageSize = DefaultMaxFragmentedMessageSize
+	}
+
 	sess.updatePacketSizeLimit()
 	sess.bufferPool = newBufferPool(uint(sess.GetPacketSizeLimit()))
 	sess.establishedPayloadSize = sess.options.PayloadSizeLimit
@@ -452,6 +495,7 @@ func (sess *Session) init(
 	sess.sendInfoPool = newSendInfoPool(sess)
 	sess.readItemPool = newReadItemPool()
 	sess.messageHeadersPool = newMessageHeadersPool()
+	sess.messageFragmentHeadersPool = newMessageFragmentHeadersPool()
 	sess.messagesContainerHeadersPool = newMessagesContainerHeadersPool()
 
 	if sess.options.SendDelay != nil {
@@ -467,6 +511,8 @@ func (sess *Session) init(
 	if psk != nil {
 		sess.auxCipherKey = hash(psk, Salt, []byte("auxCipherKey"))[:chacha.KeySize]
 	}
+
+	sess.pendingChains = make([]pendingChain, sess.options.MaxChainIDDiff)
 
 	sess.setupBackend()
 }
@@ -485,6 +531,12 @@ func (sess *Session) setupBackend() {
 func (sess *Session) getNextPacketID() uint64 {
 	result := atomic.AddUint64(&sess.nextPacketID, 1)
 	sess.debugf("next packet ID is %v", result)
+	return result
+}
+
+func (sess *Session) getNextChainID() uint64 {
+	result := atomic.AddUint64(&sess.nextLocalChainID, 1)
+	sess.debugf("next chain ID is %v", result)
 	return result
 }
 
@@ -535,7 +587,7 @@ func (sess *Session) GetEstablishedPacketSize() uint32 {
 // of negotiations. This is the real payload size used for communications.
 func (sess *Session) GetEstablishedPayloadSize() uint32 {
 	switch sess.state.Load() {
-	case SessionStateEstablished:
+	case SessionStateEstablished, SessionStateClosing:
 		return sess.establishedPayloadSize
 	}
 
@@ -909,6 +961,7 @@ func (sess *Session) processIncomingMessages(
 	}
 
 	var hdr messageHeadersData
+	var fragmentHdr messageFragmentHeadersData
 	l := umin(uint(len(messagesBytes)), uint(containerHdr.Length))
 	for i := uint(0); i < l; {
 		msgCount++
@@ -919,7 +972,7 @@ func (sess *Session) processIncomingMessages(
 		}
 		_, err := hdr.Read(messagesBytes[i : i+messageHeadersSize])
 		if err != nil {
-			sess.eventHandler.Error(sess, xerrors.Errorf("unable to read a header: %w", err))
+			sess.eventHandler.Error(sess, xerrors.Errorf("unable to read packet headers: %w", err))
 			return
 		}
 		if l-i < messageHeadersSize+uint(hdr.Length) {
@@ -932,8 +985,22 @@ func (sess *Session) processIncomingMessages(
 			receivedMessagesCount = atomic.AddUint64(&sess.receivedMessagesCount, 1)
 		}
 
-		sess.processIncomingMessage(&hdr,
-			messagesBytes[i+messageHeadersSize:i+messageHeadersSize+uint(hdr.Length)])
+		msg := messagesBytes[i+messageHeadersSize : i+messageHeadersSize+uint(hdr.Length)]
+
+		if sess.options.EnableDebug {
+			sess.debugf(`hdr.IsFragmented() == %v`, hdr.IsFragmented())
+		}
+		if hdr.IsFragmented() {
+			n, err := fragmentHdr.Read(msg)
+			if err != nil {
+				sess.eventHandler.Error(sess, xerrors.Errorf("unable to read fragment headers: %w", err))
+				return
+			}
+			msg = msg[n:]
+			sess.processIncomingMessageFragment(&hdr, &fragmentHdr, msg)
+		} else {
+			sess.processIncomingMessage(&hdr, msg)
+		}
 
 		if receivedMessagesCount > 0 && receivedMessagesCount >= sess.options.DetachOnMessagesCount {
 			if sess.GetState() == SessionStateKeyExchanging && sess.keyExchanger.options.AnswersMode == KeyExchangeAnswersModeAnswerAndWait {
@@ -950,6 +1017,60 @@ func (sess *Session) processIncomingMessages(
 	return
 }
 
+func (sess *Session) processIncomingMessageFragment(
+	hdr *messageHeadersData,
+	fragmentHdr *messageFragmentHeadersData,
+	payload []byte,
+) {
+	if fragmentHdr.ChainID > sess.lastRemoteChainID {
+		if fragmentHdr.ChainID > sess.lastRemoteChainID {
+			sess.lastRemoteChainID = fragmentHdr.ChainID
+			for idx := range sess.pendingChains {
+				sess.pendingChains[idx].Reset()
+			}
+		} else {
+			for fragmentHdr.ChainID > sess.lastRemoteChainID {
+				sess.pendingChains[sess.lastRemoteChainID%sess.options.MaxChainIDDiff].Reset()
+				sess.lastRemoteChainID++
+			}
+		}
+	}
+
+	chainIDDiff := sess.lastRemoteChainID - fragmentHdr.ChainID
+	if chainIDDiff > sess.options.MaxChainIDDiff {
+		sess.infof(`skipped fragment because of expired chain ID: %d-%d > %d`,
+			sess.lastRemoteChainID, fragmentHdr.ChainID, sess.options.MaxChainIDDiff)
+		return
+	}
+
+	chain := &sess.pendingChains[fragmentHdr.ChainID%sess.options.MaxChainIDDiff]
+	if chain.Expected == 0 {
+		if fragmentHdr.TotalMessageLength > sess.options.MaxFragmentedMessageSize {
+			sess.infof("receive a fragment of a too big message, ignoring: %d > %d",
+				fragmentHdr.TotalMessageLength, sess.options.MaxFragmentedMessageSize)
+			return
+		}
+		chain.Init(fragmentHdr.TotalMessageLength)
+	}
+
+	msg, err := chain.Merge(fragmentHdr, payload)
+	if sess.options.EnableDebug {
+		sess.debugf("received a fragment %#+v, with length: %d; merge result: %p %v (chain %p: %d/%d)",
+			fragmentHdr, len(payload), msg, err, chain, chain.Received, chain.Expected)
+	}
+	if err != nil {
+		sess.infof("unable to process merge a message fragment of chain %d: %v", fragmentHdr.ChainID, err)
+		return
+	}
+
+	if msg == nil {
+		return
+	}
+
+	hdr.Length = messageLength(len(msg))
+	sess.processIncomingMessage(hdr, msg)
+}
+
 func (sess *Session) processIncomingMessage(hdr *messageHeadersData, payload []byte) {
 	if sess.messenger[hdr.Type] != nil {
 		if err := sess.messenger[hdr.Type].handle(payload[:hdr.Length]); err != nil {
@@ -958,7 +1079,13 @@ func (sess *Session) processIncomingMessage(hdr *messageHeadersData, payload []b
 		return
 	}
 
-	item := sess.readItemPool.AcquireReadItem(sess.GetPacketSizeLimit())
+	packetSizeLimit := sess.GetPacketSizeLimit()
+	var item *readItem
+	if uint32(hdr.Length) > packetSizeLimit {
+		item = sess.readItemPool.AcquireReadItem(uint32(hdr.Length), true)
+	} else {
+		item = sess.readItemPool.AcquireReadItem(sess.GetPacketSizeLimit(), false)
+	}
 	item.Data = item.Data[0:hdr.Length]
 	copy(item.Data, payload[0:hdr.Length])
 
@@ -1311,11 +1438,14 @@ func (sess *Session) WriteMessageAsync(
 	// if msgType == messageType_keyExchange or SendDelay is zero then
 	//
 	maxPayloadSize := atomic.LoadUint32(&sess.establishedPayloadSize)
-	if uint32(len(payload)) > maxPayloadSize {
-		sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
-		sendInfo.Err = newErrPayloadTooBig(uint(maxPayloadSize), uint(len(payload)))
-		close(sendInfo.c)
-		return
+	if uint32(len(payload)) > maxPayloadSize && !msgType.isInternal() {
+		if !sess.options.EnableFragmentation {
+			sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
+			sendInfo.Err = newErrPayloadTooBig(uint(maxPayloadSize), uint(len(payload)))
+			close(sendInfo.c)
+			return
+		}
+		return sess.writeMessageAsyncAsFragmented(msgType, payload)
 	}
 
 	hdr := sess.messageHeadersPool.AcquireMessageHeaders()
@@ -1334,6 +1464,83 @@ func (sess *Session) WriteMessageAsync(
 	}
 
 	return sess.writeMessageAsync(hdr, payload)
+}
+
+func (sess *Session) writeMessageAsyncAsFragmented(
+	msgType MessageType,
+	payload []byte,
+) (sendInfo *SendInfo) {
+	if msgType.isInternal() {
+		panic("should not happen")
+	}
+
+	sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
+	var wg sync.WaitGroup
+	var errs multierror.SyncSlice
+
+	totalPayloadLength := uint64(len(payload))
+	maxFragmentLength := sess.GetEstablishedPayloadSize()
+	maxPayloadLength := maxFragmentLength - uint32(messageFragmentHeadersSize)
+	var curPos uint64
+	chainID := sess.getNextChainID()
+	for len(payload) > 0 {
+		length := maxPayloadLength
+		if length > uint32(len(payload)) {
+			length = uint32(len(payload))
+		}
+
+		wg.Add(1)
+		go func(curPos uint64, b []byte) {
+			defer wg.Done()
+			_, err := sess.writeMessageFragment(chainID, curPos, totalPayloadLength, msgType, b)
+			errs.Add(err)
+		}(curPos, payload[:length])
+
+		curPos += uint64(length)
+		payload = payload[length:]
+	}
+
+	go func() {
+		wg.Wait()
+		sendInfo.N = -1 // not supported, yet
+		sendInfo.Err = errs.ReturnValue()
+		close(sendInfo.c)
+	}()
+	return
+}
+
+func (sess *Session) writeMessageFragment(
+	chainID uint64,
+	startPos uint64,
+	totalLength uint64,
+	msgType MessageType,
+	fragmentPayload []byte,
+) (n int, err error) {
+	if msgType.isInternal() {
+		panic("should not happen")
+	}
+
+	buf := sess.bufferPool.AcquireBuffer()
+	defer buf.Release()
+
+	buf.Grow(messageFragmentHeadersSize + uint(len(fragmentPayload)))
+
+	fragmentHdr := sess.messageFragmentHeadersPool.AcquireMessageFragmentHeaders()
+	fragmentHdr.Set(chainID, startPos, totalLength)
+	_, err = fragmentHdr.Write(buf.Bytes)
+	if err != nil {
+		return 0, wrapError(err)
+	}
+
+	copy(buf.Bytes[messageFragmentHeadersSize:], fragmentPayload)
+
+	hdr := sess.messageHeadersPool.AcquireMessageHeaders()
+	hdr.Set(msgType, buf.Bytes)
+	defer hdr.Release()
+
+	hdr.SetIsFragmented(true)
+
+	return sess.writeMessageSingle(hdr, buf.Bytes)
 }
 
 func (sess *Session) writeMessageSingle(
@@ -1359,7 +1566,7 @@ func (sess *Session) writeMessageSingle(
 
 	return sess.sendMessages(
 		hdr.IsConfidential(),
-		isInternalMessageType(hdr.Type),
+		hdr.Type.isInternal(),
 		buf.Bytes,
 	)
 }
@@ -1384,7 +1591,7 @@ func (sess *Session) writeMessageAsync(
 		return
 	}
 
-	if !isInternalMessageType(hdr.Type) && sess.GetState() != SessionStateEstablished {
+	if !hdr.Type.isInternal() && sess.GetState() != SessionStateEstablished {
 		select {
 		case <-sess.ctx.Done():
 			sendInfo = sess.sendInfoPool.AcquireSendInfo(sess.ctx)
@@ -1513,6 +1720,12 @@ func (sess *Session) appendToDelayedWriteBuffer(
 		panic(fmt.Sprintf("%+v", sendInfo))
 	}
 	sess.delayedSenderTimerLocker.LockDo(func() {
+		if !sess.delayedSenderTimer.Stop() {
+			select {
+			case _, _ = <-sess.delayedSenderTimer.C:
+			default:
+			}
+		}
 		sess.delayedSenderTimer.Reset(*sess.options.SendDelay)
 	})
 	atomic.StoreUint64(&sess.lastSendInfoSendID, sendInfo.sendID)
@@ -1621,7 +1834,10 @@ func (sess *Session) delayedSenderLoop() {
 		if atomic.LoadUint64(&sess.lastSendInfoSendID) > sendID {
 			sess.delayedSenderTimerLocker.LockDo(func() {
 				if !sess.delayedSenderTimer.Stop() {
-					<-sess.delayedSenderTimer.C
+					select {
+					case _, _ = <-sess.delayedSenderTimer.C:
+					default:
+					}
 				}
 				sess.delayedSenderTimer.Reset(*sess.options.SendDelay)
 			})
@@ -1684,8 +1900,8 @@ func (sess *Session) sendMessages(
 			case <-sess.isEstablished:
 			}
 		}
-		if uint32(messagesContainerHeadersSize)+uint32(len(messagesBytes)) > sess.GetEstablishedPacketSize() {
-			err = newErrPayloadTooBig(uint(len(messagesBytesOut)), messagesContainerHeadersSize+uint(len(messagesBytes)))
+		if uint32(messagesContainerHeadersSize)+uint32(len(messagesBytesOut)) > sess.GetEstablishedPacketSize() {
+			err = newErrPayloadTooBig(uint(sess.GetEstablishedPacketSize()), messagesContainerHeadersSize+uint(len(messagesBytesOut)))
 			return 0, err
 		}
 	}

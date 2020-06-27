@@ -82,8 +82,8 @@ const (
 	messageTypeReservedAbove
 )
 
-func isInternalMessageType(msgType MessageType) bool {
-	switch msgType {
+func (t MessageType) isInternal() bool {
+	switch t {
 	case messageTypeKeyExchange, messageTypeNegotiation:
 		return true
 	}
@@ -93,10 +93,10 @@ func isInternalMessageType(msgType MessageType) bool {
 // MessageTypeChannel returns MessageType for multiplexer.
 // See (*Session).SetHandlerFuncs.
 func MessageTypeChannel(channelID uint32) MessageType {
-	if channelID > uint32(messageTypeReservedAbove) {
+	if channelID+1 >= uint32(messageTypeReservedAbove) {
 		panic("channelID is too high")
 	}
-	return MessageType(channelID)
+	return MessageType(channelID) + 1
 }
 
 func (t MessageType) String() string {
@@ -132,6 +132,7 @@ type messageFlags uint8
 
 const (
 	messageFlagsIsConfidential = messageFlags(1 << iota)
+	messageFlagsIsFragmented
 )
 
 func (flags messageFlags) IsConfidential() bool {
@@ -142,6 +143,17 @@ func (flags *messageFlags) SetIsConfidential(newValue bool) {
 		*flags |= messageFlagsIsConfidential
 	} else {
 		*flags &= ^messageFlagsIsConfidential
+	}
+}
+
+func (flags messageFlags) IsFragmented() bool {
+	return flags&messageFlagsIsFragmented != 0
+}
+func (flags *messageFlags) SetIsFragmented(newValue bool) {
+	if newValue {
+		*flags |= messageFlagsIsFragmented
+	} else {
+		*flags &= ^messageFlagsIsFragmented
 	}
 }
 

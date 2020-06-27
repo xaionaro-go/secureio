@@ -10,10 +10,13 @@ require (
 	github.com/xaionaro-go/bytesextra v0.0.0-20200223153815-1ed74f0bfcd8
 	github.com/xaionaro-go/errors v0.0.0-20200223133802-5f1bdcd2dd3e
 	github.com/xaionaro-go/iotools v0.0.0-20200216153546-c9a0cc99df46
+	github.com/xaionaro-go/multierror v0.0.0-20200607190004-3c7acd4827aa
 	github.com/xaionaro-go/slice v0.0.0-20200126131228-455c082ffedb
 	github.com/xaionaro-go/spinlock v0.0.0-20200518175509-30e6d1ce68a1
+	github.com/xaionaro-go/synctools v0.0.0-20200209183817-f47054253862 // indirect
 	github.com/xaionaro-go/udpnofrag v0.0.0-20200601115339-bb59efae8688
 	github.com/xaionaro-go/unsafetools v0.0.0-20200202162159-021b112c4d30
 	golang.org/x/crypto v0.0.0-20200510223506-06a226fb4e37
+	golang.org/x/tools v0.0.0-20200626171337-aa94e735be7f
 	lukechampine.com/blake3 v1.0.0
 )

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"os"
 	"runtime"
 	"strings"
@@ -176,44 +177,54 @@ func TestSessionAsyncWrite(t *testing.T) {
 func TestSession_WriteMessageAsync_noHanging(t *testing.T) {
 	benchmarkSessionWriteRead(
 		&testing.B{N: 10000},
-		1, 0, true, false,
+		1, 0, true, false, false, false,
 		&testLogger{t},
 	)
 }
 
 func BenchmarkSessionWriteRead1(b *testing.B) {
-	benchmarkSessionWriteRead(b, 1, 0, false, true, nil)
+	benchmarkSessionWriteRead(b, 1, 0, false, true, false, false, nil)
 }
 func BenchmarkSessionWriteRead16(b *testing.B) {
-	benchmarkSessionWriteRead(b, 16, 0, false, true, nil)
+	benchmarkSessionWriteRead(b, 16, 0, false, true, false, false, nil)
 }
 func BenchmarkSessionWriteRead1024(b *testing.B) {
-	benchmarkSessionWriteRead(b, 1024, 0, false, true, nil)
+	benchmarkSessionWriteRead(b, 1024, 0, false, true, false, false, nil)
 }
 func BenchmarkSessionWriteRead32000(b *testing.B) {
-	benchmarkSessionWriteRead(b, 32000, 0, false, true, nil)
+	benchmarkSessionWriteRead(b, 32000, 0, false, true, false, false, nil)
 }
 func BenchmarkSessionWriteRead64000(b *testing.B) {
-	benchmarkSessionWriteRead(b, 64000, 0, false, true, nil)
+	benchmarkSessionWriteRead(b, 64000, 0, false, true, false, false, nil)
 }
 func BenchmarkSessionWriteMessageAsyncRead1(b *testing.B) {
-	benchmarkSessionWriteRead(b, 1, 0, true, false, nil)
+	benchmarkSessionWriteRead(b, 1, 0, true, false, false, false, nil)
 }
 func BenchmarkSessionWriteMessageAsyncRead16(b *testing.B) {
-	benchmarkSessionWriteRead(b, 16, 0, true, false, nil)
+	benchmarkSessionWriteRead(b, 16, 0, true, false, false, false, nil)
 }
 func BenchmarkSessionWriteMessageAsyncRead1024(b *testing.B) {
-	benchmarkSessionWriteRead(b, 1024, 0, true, false, nil)
+	benchmarkSessionWriteRead(b, 1024, 0, true, false, false, false, nil)
 }
 func BenchmarkSessionWriteMessageAsyncRead32000(b *testing.B) {
-	benchmarkSessionWriteRead(b, 32000, 0, true, false, nil)
+	benchmarkSessionWriteRead(b, 32000, 0, true, false, false, false, nil)
 }
 func BenchmarkSessionWriteMessageAsyncRead64000(b *testing.B) {
-	benchmarkSessionWriteRead(b, 64000, 0, true, false, nil)
+	benchmarkSessionWriteRead(b, 64000, 0, true, false, false, false, nil)
 }
 
 func BenchmarkSessionWriteMessageAsyncRead1300_max1400(b *testing.B) {
-	benchmarkSessionWriteRead(b, 1300, 1400, true, false, nil)
+	benchmarkSessionWriteRead(b, 1300, 1400, true, false, false, false, nil)
+}
+func BenchmarkSessionWriteMessageAsyncRead60000_max1400_withFrag(b *testing.B) {
+	benchmarkSessionWriteRead(b, 1300, 1400, true, false, true, false, nil)
+}
+
+func BenchmarkSessionWriteMessageAsyncRead1300_max1400_udp(b *testing.B) {
+	benchmarkSessionWriteRead(b, 1300, 1400, true, false, false, true, nil)
+}
+func BenchmarkSessionWriteMessageAsyncRead60000_max1400_udp_withFrag(b *testing.B) {
+	benchmarkSessionWriteRead(b, 1300, 1400, true, false, true, true, nil)
 }
 
 func benchmarkSessionWriteRead(
@@ -222,6 +233,8 @@ func benchmarkSessionWriteRead(
 	maxPayloadSize uint,
 	shouldWriteAsMessage bool,
 	isSync bool,
+	enableFragmentation bool,
+	isUDP bool,
 	eventHandler EventHandler,
 ) {
 	if !isSync && !shouldWriteAsMessage {
@@ -232,7 +245,14 @@ func benchmarkSessionWriteRead(
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
 
-	identity0, identity1, conn0, conn1 := testPair(nil)
+	var identity0, identity1 *Identity
+	var conn0, conn1 net.Conn
+	if isUDP {
+		identity0, identity1, _, _ = testPair(nil)
+		conn0, conn1 = testUDPPair(nil)
+	} else {
+		identity0, identity1, conn0, conn1 = testPair(nil)
+	}
 
 	if eventHandler == nil {
 		eventHandler = wrapErrorHandler(&dummyEventHandler{}, func(sess *Session, err error) bool {
@@ -249,16 +269,19 @@ func benchmarkSessionWriteRead(
 
 	var wg sync.WaitGroup
 
-	var opts *SessionOptions
+	opts := SessionOptions{
+		EnableFragmentation: enableFragmentation,
+		NegotiatorOptions: NegotiatorOptions{
+			Enable: NegotiatorEnableFalse,
+		},
+	}
 	if maxPayloadSize > 0 {
-		opts = &SessionOptions{
-			PayloadSizeLimit: uint32(maxPayloadSize),
-		}
+		opts.PayloadSizeLimit = uint32(maxPayloadSize)
 	}
 
-	sess0 := identity0.NewSession(identity1, conn0, eventHandler, opts)
+	sess0 := identity0.NewSession(identity1, conn0, eventHandler, &opts)
 	_ = sess0.Start(ctx)
-	sess1 := identity1.NewSession(identity0, conn1, eventHandler, opts)
+	sess1 := identity1.NewSession(identity0, conn1, eventHandler, &opts)
 	_ = sess1.Start(ctx)
 	defer func() {
 		cancelFunc()
@@ -742,7 +765,6 @@ func TestSession_StartClose(t *testing.T) {
 	ctx := context.Background()
 
 	identity0, identity1, conn0, conn1 := testPair(t)
-	conn1.Close()
 
 	opts := &SessionOptions{}
 
@@ -757,4 +779,44 @@ func TestSession_StartClose(t *testing.T) {
 	require.NoError(t, sess0.Close())
 	require.Error(t, sess0.Start(ctx))
 	require.Error(t, sess0.Close())
+	require.NoError(t, conn1.Close())
+}
+
+func TestSession_Fragmentation(t *testing.T) {
+	ctx := context.Background()
+
+	identity0, identity1, conn0, conn1 := testPair(t)
+
+	opts := &SessionOptions{
+		EnableDebug:         true,
+		EnableFragmentation: true,
+		PayloadSizeLimit:    1000,
+	}
+
+	sess0 := identity0.NewSession(identity1, conn0, &testLogger{t}, opts)
+	printLogsOfSession(t, true, sess0)
+	err := sess0.Start(ctx)
+	require.NoError(t, err)
+
+	sess1 := identity1.NewSession(identity0, conn1, &testLogger{t}, opts)
+	printLogsOfSession(t, true, sess1)
+	err = sess1.Start(ctx)
+	require.NoError(t, err)
+
+	writeBuf := make([]byte, 60000)
+	rand.Read(writeBuf)
+	readBuf := make([]byte, 60000)
+
+	_, err = sess0.Write(writeBuf)
+	assert.NoError(t, err)
+
+	_, err = sess1.Read(readBuf)
+	assert.NoError(t, err)
+
+	assert.Equal(t, writeBuf, readBuf)
+
+	assert.NoError(t, sess0.Close())
+	assert.NoError(t, sess1.Close())
+
+	waitForClosure(t, sess0, sess1)
 }

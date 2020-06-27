@@ -406,3 +406,18 @@ func newErrNegotiationCancelled(description string) error {
 func (err errNegotiationCancelled) Error() string {
 	return fmt.Sprintf("negotiation was cancelled: %s", err.Description)
 }
+
+type errOutOfRange struct {
+	RangeLength  uint64
+	RequestedPos uint64
+}
+
+func newErrOutOfRange(rangeLength, requestedPos uint64) error {
+	err := errors.New(errOutOfRange{RangeLength: rangeLength, RequestedPos: requestedPos})
+	err.Traceback.CutOffFirstNLines += 2
+	return err
+}
+func (err errOutOfRange) Error() string {
+	return fmt.Sprintf("requested a position out of range: %d > %d",
+		err.RequestedPos, err.RangeLength)
+}

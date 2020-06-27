@@ -7,8 +7,9 @@ import (
 type readItem struct {
 	Data []byte
 
-	isBusy bool
-	pool   *readItemPool
+	isBusy       bool
+	isOneTimeUse bool
+	pool         *readItemPool
 }
 
 type readItemPool struct {
@@ -27,8 +28,15 @@ func newReadItemPool() *readItemPool {
 	return pool
 }
 
-func (pool *readItemPool) AcquireReadItem(maxSize uint32) *readItem {
-	item := pool.storage.Get().(*readItem)
+func (pool *readItemPool) AcquireReadItem(maxSize uint32, isOneTimeUse bool) *readItem {
+	var item *readItem
+	if isOneTimeUse {
+		item = &readItem{
+			pool: pool,
+		}
+	} else {
+		item = pool.storage.Get().(*readItem)
+	}
 	if item.isBusy {
 		panic(`should not happened`)
 	}
@@ -42,6 +50,9 @@ func (pool *readItemPool) AcquireReadItem(maxSize uint32) *readItem {
 func (pool *readItemPool) Put(freeReadItem *readItem) {
 	if !freeReadItem.isBusy {
 		panic(`should not happened`)
+	}
+	if freeReadItem.isOneTimeUse {
+		return
 	}
 	freeReadItem.isBusy = false
 	freeReadItem.Data = freeReadItem.Data[:0]
