@@ -2018,6 +2018,7 @@ func (sess *Session) GetRemoteIdentity() (result *Identity) {
 }
 
 func (sess *Session) onConnect() {
+	sess.debugf("onConnect()")
 	defer sess.debugf("/onConnect()")
 
 	sess.setState(SessionStateEstablished,
@@ -2026,7 +2027,7 @@ func (sess *Session) onConnect() {
 
 	close(sess.isEstablished)
 
-	sess.eventHandler.OnConnect(sess)
+	go sess.eventHandler.OnConnect(sess)
 
 	sess.debugf("established! sess.sendDelayedNow()")
 	for {
