@@ -3,6 +3,12 @@
 [![Build Status](https://travis-ci.org/xaionaro-go/secureio.svg?branch=master)](https://travis-ci.org/xaionaro-go/secureio)
 [![Coverage Status](https://coveralls.io/repos/github/xaionaro-go/secureio/badge.svg?branch=master)](https://coveralls.io/github/xaionaro-go/secureio?branch=master)
 
+# Archived
+
+This is a useless NIH project with pretty subpar cryptography decisions.
+
+Now a lot of good projects exist that offer encrypted connections via UDP, e.g.: https://github.com/pion/dtls. Those projects follow standards, have much bigger community and they, I hope, had opportunity to actually design stuff properly.
+
 # Quick start
 
 Prepare keys (on both sides):
